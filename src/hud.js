@@ -14,7 +14,7 @@ export class HUD {
       <div class="hitmarker" id="hitmarker"><i></i><i></i></div>
       <div class="dmg-ind" id="dmg"></div>
       <div class="hud-tl"><div class="score">SCORE <b id="score">0</b></div><div class="combo" id="combo"></div></div>
-      <div class="hud-tr"><div class="wave">WAVE <b id="wave">1</b></div><div class="modifier" id="modifier"></div><div class="left"><b id="left">0</b> enemies left</div><div class="timer" id="timer"></div><div class="pvpscore" id="pvpscore" hidden></div></div><div class="board" id="board" hidden></div>
+      <div class="hud-tr"><div class="wave">WAVE <b id="wave">1</b></div><div class="modifier" id="modifier"></div><div class="left"><b id="left">0</b> enemies left</div><div class="timer" id="timer"></div><div class="weapon-rule" id="weaponrule" hidden></div><div class="pvpscore" id="pvpscore" hidden></div></div><div class="board" id="board" hidden></div>
       <div class="bossbar" id="bossbar"><div class="bossname" id="bossname"></div><div class="bar big"><div class="fill red" id="bossfill"></div></div></div>
       <div class="hud-bl">
         <div class="health"><span>HP</span><div class="bar"><div class="fill" id="hpfill"></div></div><span id="hpnum">100</span></div>
@@ -43,7 +43,7 @@ export class HUD {
     if (Math.abs(f - (this._fmFrac ?? -1)) > 0.005) { this._fmFrac = f; this.el.fmfill.style.height = (f * 100).toFixed(1) + '%'; }
     if (ready !== this._fmReady) { this._fmReady = ready; m.classList.toggle('ready', ready); }
   }
-  setGrenades(n) { if (n === this._nades) return; this._nades = n; let h = ''; for (let i = 0; i < n; i++) h += '<i></i>'; this.el.nades.innerHTML = h; }
+  setGrenades(n) { if (n === this._nades) return; this._nades = n; let h = ''; if (n === Infinity) h = '<b class="infinite">∞</b>'; else for (let i = 0; i < Math.min(5, Math.max(0, n)); i++) h += '<i></i>'; this.el.nades.innerHTML = h; this.el.nades.hidden = n === 0; this.el.nades.title = ts(n === Infinity ? 'unlimited grenades' : 'grenades'); }
   // control labels follow whatever you touched last
   setDevice(pad) { if (pad === this._pad) return; this._pad = pad; this.root.classList.toggle('pad', pad); if (this.onDevice) this.onDevice(pad); }
   // a phone never grows a keyboard, so touch labels win outright once we are in that mode
@@ -88,8 +88,8 @@ export class HUD {
   }
   setKatana() { this.el.mag.textContent = '∞'; this.el.reserve.textContent = ''; this.el.reloading.textContent = ''; if (this._lastTally !== -1) { this.el.tally.innerHTML = ''; this._lastTally = -1; } }
   setSlots(slots) {
-    const key = slots.map((s) => `${s.name}|${s.active ? 1 : 0}|${s.ammo}`).join(';'); if (key === this._lastSlots) return; this._lastSlots = key;
-    this.el.slots.innerHTML = slots.map((s, i) => `<div class="slot${s.active ? ' active' : ''}${s.empty ? ' empty' : ''}"><span class="num">${i + 1}</span>${s.name}<span class="sammo">${s.ammo}</span></div>`).join('');
+    const key = slots.map((s) => `${s.slot}|${s.key}|${s.name}|${s.active ? 1 : 0}|${s.ammo}`).join(';'); if (key === this._lastSlots) return; this._lastSlots = key;
+    this.el.slots.innerHTML = slots.map((s, i) => `<div class="slot${s.active ? ' active' : ''}${s.empty ? ' empty' : ''}"><span class="num">${s.key ?? s.slot ?? i + 1}</span>${s.name}<span class="sammo">${s.ammo}</span></div>`).join('');
     trDom(this.el.slots);
   }
   setHealth(hp, max) { const f = Math.max(0, hp / max); this.el.hpfill.style.width = (f * 100).toFixed(1) + '%'; this.el.hpnum.textContent = Math.ceil(hp); this.root.classList.toggle('low', f < 0.3); }
@@ -100,6 +100,7 @@ export class HUD {
   setTimer(text) { this.el.timer.textContent = text ? ts(text) : ''; }
   setScore(score, combo) { this.el.score.textContent = score; this.el.combo.textContent = combo > 1 ? ts('combo x{}', combo) : ''; }
   setWeapon(name, hint) { this.el.weapon.textContent = ts(name); this.el.hint.textContent = hint ? ts(hint) : ''; }
+  setWeaponMode(name) { const el = this.root.querySelector('#weaponrule'), text = name ? ts(name) : ''; if (el.textContent !== text) el.textContent = text; el.hidden = !name; }
   setBoss(name, frac) { if (frac == null) { this.el.bossbar.classList.remove('show'); return; } this.el.bossbar.classList.add('show'); this.el.bossname.textContent = ts(name); this.el.bossfill.style.width = (Math.max(0, frac) * 100).toFixed(1) + '%'; }
   tip(text, dur = 5) { this.el.tip.innerHTML = ts(text); this.el.tip.classList.add('show'); this._tipT = dur; }
   message(main, sub = '', dur = 2.2) { const m = this.el.msg; m.textContent = ts(main); m.classList.remove('show'); void m.offsetWidth; m.classList.add('show'); this.el.msgsub.textContent = sub ? ts(sub) : ''; this._msgT = dur; }

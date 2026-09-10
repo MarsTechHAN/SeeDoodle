@@ -38,7 +38,7 @@ export class Net {
     this.maxPlayers = 10; this._accepting = true; this._inMatch = false; this._hostName = '';
     this.stats = { sent: 0, recv: 0 }; this.isPublic = false;
     this._waits = new Map(); this._waitSeq = 0; this._pingT = null; this.rtt = 0;
-    this.token = null; this.resuming = false; this._meta = {}; this.pings = {};
+    this.token = null; this.resuming = false; this._resumeSeat = null; this._meta = {}; this.pings = {};
   }
   get active() { return !!this.sock && this.connected; }
   get peerIds() { return [...this.conns.keys()]; }
@@ -98,6 +98,8 @@ export class Net {
     // the game above carries on simulating and its sends no-op until there is a socket again.
     if (this.resuming) return;
     this.resuming = true;
+    // Each replacement socket receives a new hello id; retries must keep claiming the original seat.
+    this._resumeSeat = { id: this.id, token: this.token, code: this.code };
     if (this.onStall) this.onStall(true);
     this._retry(0);
   }
@@ -108,7 +110,7 @@ export class Net {
     if (n >= RETRY_MS.length) { this._giveUp('lost the connection to the server'); return; }
     await new Promise((r) => setTimeout(r, RETRY_MS[n]));
     if (!this.resuming) return;
-    const seat = { id: this.id, token: this.token, code: this.code };
+    const seat = this._resumeSeat;
     try { await this._ensure(); } catch (e) { this._retry(n + 1); return; }
     if (!this.resuming) return;
     try {
@@ -119,17 +121,19 @@ export class Net {
     if (!this.resuming) return;
     if (!seat.code) { this._giveUp('lost the connection to the server'); return; }
     try {
-      const res = await this._request({ t: 'join', code: seat.code, name: this._hostName, meta: this._meta }, 'join');
+      const res = await this._request({ t: 'join', code: seat.code, name: this._hostName, meta: { ...this._meta, prev: seat.id } }, 'join');
       this._back(res, res.hostId === (res.id || this.id));
     } catch (e) { this._retry(n + 1); }
   }
   _back(res, isHost) {
+    const oldHost = this.hostId, wasHost = this.isHost;
     this._adopt(res, isHost);
-    this.resuming = false;
-    if (this.onStall) this.onStall(false);
+    this.resuming = false; this._resumeSeat = null;
+    if (oldHost !== this.hostId && this.onHostChange) this.onHostChange(this.hostId, this.isHost && !wasHost);
+    if (this.onStall) this.onStall(false, res);
   }
   _giveUp(msg) {
-    this.resuming = false;
+    this.resuming = false; this._resumeSeat = null;
     if (this.onStall) this.onStall(false);
     this.connected = false; this.conns.clear();
     if (this.onDisconnect) this.onDisconnect(msg);
@@ -268,7 +272,7 @@ export class Net {
     this._raw({ t: 'alias', code: String(code).toUpperCase() });
   }
   leave() {
-    this.resuming = false;   // whatever we were going back for, we no longer want it
+    this.resuming = false; this._resumeSeat = null;   // whatever we were going back for, we no longer want it
     if (this.sock && this.sock.readyState === 1 && this.connected) this._raw({ t: 'leave' });
     this.connected = false; this.isHost = false; this.conns.clear();
     this.code = null; this.hostId = null; this.aliasCode = null; this._inMatch = false;

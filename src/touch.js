@@ -46,6 +46,7 @@ export class TouchControls {
     this._faces = [...wrap.querySelectorAll('.tb')];
     onLangChange(() => {
       this._faces.forEach((el, i) => { el.textContent = ts(BTNS[i][1]); });
+      const mode = this._weaponMode || 'normal'; this._weaponMode = null; this.setWeaponMode(mode);
       const m = this.rotEl && this.rotEl.querySelector('.rotmsg'); if (m) m.textContent = ts('turn your phone sideways');
     });
     // shown by CSS only while the phone is upright; it sits outside .tc so a menu cannot hide it
@@ -141,15 +142,26 @@ export class TouchControls {
   // are carrying, so the buttons carry the readout instead: the one in your hands is inked in, one
   // that is dry goes red, and a slot you do not own yet is not drawn at all.
   setSlots(slots) {
-    const key = slots.map((s) => (s.active ? 'a' : s.empty ? 'e' : 'o')).join('') + slots.length;
+    const key = slots.map((s, i) => `${s.slot ?? i + 1}:${s.active ? 'a' : s.empty ? 'e' : 'o'}`).join('|');
     if (key === this._slotKey) return; this._slotKey = key;
     for (let i = 0; i < 5; i++) {
       const el = (this.btnEls['slot' + (i + 1)] || [])[0]; if (!el) continue;
-      const s = slots[i];
+      const s = slots.find((s, index) => (s.slot ?? index + 1) === i + 1);
       el.classList.toggle('gone', !s);
       el.classList.toggle('cur', !!(s && s.active));
       el.classList.toggle('dry', !!(s && s.empty));
     }
+  }
+
+  setWeaponMode(mode) {
+    if (mode === this._weaponMode) return; this._weaponMode = mode; this.clearAim();
+    const grenades = mode === 'grenades', knives = mode === 'knives';
+    for (const action of ['grenade', 'melee', 'reload', 'aim']) {
+      const hidden = action === 'grenade' ? knives : action === 'melee' || action === 'aim' ? grenades : grenades || knives;
+      for (const el of this.btnEls[action] || []) el.classList.toggle('gone', hidden);
+      if (hidden) delete this.frames[action];
+    }
+    for (const el of this.btnEls.fire || []) el.textContent = ts(grenades ? 'THROW' : knives ? 'SLASH' : 'FIRE');
   }
 
   // called once per frame, before Input.update folds everything together

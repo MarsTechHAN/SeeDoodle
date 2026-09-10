@@ -1,6 +1,6 @@
 // First-person view models + firing logic: rifle, shotgun, sniper and revolver, the rocket launcher
-// that only exists once you have found one, and the katana. Rounds are hitscan unless the match is
-// running ballistics (see ../src/bullets.js); the rocket is always a real projectile.
+// that only exists once you have found one, the katana, and a grenade held for grenade-only play.
+// Rounds are hitscan unless the match is running ballistics; rockets are always real projectiles.
 import * as THREE from 'three';
 import { makeInkMaterial, INK } from './render.js';
 import { SEE_THROUGH } from './physics.js';
@@ -37,6 +37,7 @@ class ViewModel {
     this.swayPos = new THREE.Vector3(); this.swayRot = new THREE.Vector3();
     this.aimAmt = 0; this.sprintAmt = 0; this.equipT = 0;
   }
+  get allowed() { return !this.ctx.player?.weaponAllowed || this.ctx.player.weaponAllowed(this.kind); }
   setSight(x, y, z, dist) { this.aimPos.set(-x * this.scale, -y * this.scale, -z * this.scale - dist); }
   equip() { this.equipT = 0; this.root.visible = true; }
   unequip() { this.root.visible = false; }
@@ -94,17 +95,18 @@ export class Gun extends ViewModel {
   // No ceiling on what you can carry: a supply crate you walk over while full used to evaporate,
   // and the HUD still cheerfully said +AMMO. `maxReserve` survives as the reference a pickup is
   // sized against (`Player.addAmmoAll`), not as a cap.
-  addAmmo(n) { this.reserve += n; }
+  addAmmo(n) { if (this.allowed) this.reserve += n; }
   // A locked weapon is in the list but not in the world: no slot on the HUD, `switchTo` refuses it,
   // and `addAmmoAll` walks past it. Picking one up loads it and hands you the tube.
-  unlock(rounds) { const first = this.locked; this.locked = false; if (first) this.mag = this.magSize; this.reserve += rounds; return first; }
+  unlock(rounds) { if (!this.allowed) return false; const first = this.locked; this.locked = false; if (first) this.mag = this.magSize; this.reserve += rounds; return first; }
   relock() { this.locked = !!GUNS[this.kind].locked; if (this.locked) { this.mag = 0; this.reserve = 0; } }
   startReload() {
-    if (this.reloading || this.mag >= this.magSize || this.reserve <= 0) return;
+    if (!this.allowed || this.locked || this.reloading || this.mag >= this.magSize || this.reserve <= 0) return;
     this.reloading = true; this.reloadT = 0; this.racked = false;
     if (this.reloadType === 'shells') audio.shell(); else if (this.reloadType === 'cylinder') audio.cylinder(); else audio.reload();
   }
   update(dt, st) {
+    if (!this.allowed || this.locked) return;
     this.fireT -= dt; if (this.flashT > 0) { this.flashT -= dt; if (this.flashT <= 0) this.flash.visible = false; }
     // let go of the trigger for a third of a second and the gun is settled again: the next shot is
     // a first shot. This is what makes tapping worth doing instead of holding it down.
@@ -153,6 +155,7 @@ export class Gun extends ViewModel {
     }
   }
   fire(st) {
+    if (!this.allowed || this.locked) return false;
     const ctx = this.ctx, P = ctx.player; this.fireT = this.interval; this.mag--;
     const spreadNow = this.spreadCur; const he = this.hipEase; this.spreadCur = Math.min(this.spreadCur + this.spreadKick * he, this.spreadMax * he);
     let hits = 0;
@@ -183,6 +186,7 @@ export class Gun extends ViewModel {
     audio[this.sound](); ctx.input.rumble(0.15 + this.fovKick * 0.08, 0.5, 40 + this.fovKick * 15); ctx.effects.shakeAmt += 0.02 + this.fovKick * 0.02;
     if (hits > 0 && this.kind === 'shotgun') ctx.game.hitstop(0.03, 0.3);
     if (this.mag === 0 && this.reloadType === 'mag') setTimeout(() => { if (this.mag === 0 && !this.reloading) this.startReload(); }, 250);
+    return true;
   }
   // Where the shot visibly leaves from. Normally the muzzle — but behind a scope the gun is not
   // drawn at all, and its muzzle sits a couple of degrees below the sight line, so tracers and
@@ -203,6 +207,7 @@ export class Gun extends ViewModel {
   // step, so damage falloff reads the whole path rather than the last few metres of it, and
   // `muzzle`/`tof` are what a PVP claim needs to describe a curve the server cannot re-trace.
   resolveShot(origin, dir, maxDist, travelled = 0, muzzle = null, tof = 0) {
+    if (!this.allowed) return { end: origin.clone(), hit: false, stopped: true };
     const ctx = this.ctx; const hitE = ctx.enemies.raycast(origin, dir, maxDist), hitW = ctx.world.raycast(origin, dir, maxDist, SEE_THROUGH);
     let end, hit = false, stopped = true;
     // other players in a versus match are targets too; the closest thing along the ray wins
@@ -348,9 +353,27 @@ export class Rocket extends Gun {
     if (this.backblast.visible && (this.flashT <= 0)) this.backblast.visible = false;
   }
   fire(st) {
-    super.fire(st);
+    if (!super.fire(st)) return;
     this.backblast.visible = true; this.backblast.rotation.z = rand(0, TAU); this.backblast.scale.setScalar(rand(1.6, 2.6));
     const P = this.ctx.player; this.ctx.effects.smoke(P.eye.clone().addScaledVector(P.forward, -0.2), _v2.copy(P.forward).negate(), 6);
+  }
+}
+
+export class Grenade extends ViewModel {
+  constructor(ctx) {
+    super(ctx); this.name = 'GRENADES'; this.hint = 'hold fire or grenade to aim - release to throw'; this.kind = 'grenade'; this.locked = true;
+    this.basePos.set(0.2, -0.2, -0.38); this.aimPos.copy(this.basePos);
+    const mat = makeInkMaterial({ ink: INK.BLUE }), dark = makeInkMaterial({ ink: INK.BLACK }), orange = makeInkMaterial({ ink: INK.ORANGE });
+    sph(0.16, 0, 0, 0, dark, this.root);
+    cyl(0.06, 0.1, 0, 0.17, 0, orange, this.root, 'y', 6);
+    const pin = new THREE.Mesh(new THREE.TorusGeometry(0.07, 0.02, 4, 8), orange); pin.position.set(0, 0.24, 0); this.root.add(pin);
+    hand(mat, 0, -0.1, 0.035, this.root, [0.45, -0.5, 1]);
+  }
+  get spreadPx() { return 4; }
+  update() {
+    // Player owns the shared grenade input and cooldown, so FIRE and G cannot produce two throws.
+    const charge = this.ctx.player?._nadeHeld ? this.ctx.player.nadeCharge : 0;
+    this.root.position.y += charge * 0.045; this.root.position.z += charge * 0.06; this.root.rotation.x -= charge * 0.35;
   }
 }
 
@@ -401,6 +424,7 @@ export class Katana extends ViewModel {
   }
   get spreadPx() { return 4; }
   startSlash(st) {
+    if (!this.allowed) return false;
     this.slashT = this.slashDur; this.hitDone = false; this.combo++; this.comboT = 0.9; this.cooldown = this.slashDur + 0.06;
     audio.katanaSwing(); this.ctx.player.kickFov(2);
     if (st.sprinting || !st.grounded) this.ctx.player.lunge(5.5);
@@ -413,6 +437,7 @@ export class Katana extends ViewModel {
     }
   }
   update(dt, st) {
+    if (!this.allowed) { this.slashT = 0; this.blocking = false; return; }
     this.cooldown -= dt; this.comboT -= dt; if (this.comboT <= 0) this.combo = 0; this.deflectKick = Math.max(0, this.deflectKick - dt * 6);
     this.parrySwing = Math.max(0, this.parrySwing - dt * 4.5);
     this.updateBlood(dt, st);
@@ -445,6 +470,7 @@ export class Katana extends ViewModel {
     if (st.meleePressed && this.slashT <= 0 && this.cooldown <= 0) this.startSlash(st);
   }
   doHit(st, s) {
+    if (!this.allowed) return;
     const ctx = this.ctx, P = ctx.player;
     const hits = ctx.enemies.inArc(P.eye, P.forward, 3.0, Math.cos(0.95));
     _v2.copy(P.forward); _v.set(-P.forward.z, 0, P.forward.x).multiplyScalar(s * 0.7); _v2.add(_v).y -= 0.35; _v2.normalize();

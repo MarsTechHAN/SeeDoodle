@@ -34,6 +34,15 @@ export const DIFFICULTY = {
 };
 export const diffOf = (k) => DIFFICULTY[k] || DIFFICULTY.easy;
 
+// Room weapon rules are independent of survival/deathmatch and never change the solo loadout.
+export const WEAPON_MODES = {
+  normal: { key: 'normal', name: 'NORMAL', blurb: 'all weapons and grenades', weapons: ['rifle', 'shotgun', 'sniper', 'katana', 'rocket', 'revolver'], grenades: true, infiniteGrenades: false },
+  no_sniper: { key: 'no_sniper', name: 'NO SNIPERS', blurb: 'all weapons except the sniper rifle', weapons: ['rifle', 'shotgun', 'katana', 'rocket', 'revolver'], grenades: true, infiniteGrenades: false },
+  grenades: { key: 'grenades', name: 'GRENADES ONLY', blurb: 'unlimited grenades - no guns or knives', weapons: ['grenade'], grenades: true, infiniteGrenades: true },
+  knives: { key: 'knives', name: 'KNIVES ONLY', blurb: 'katana only - no guns or grenades', weapons: ['katana'], grenades: false, infiniteGrenades: false },
+};
+export const weaponModeOf = (k) => Object.hasOwn(WEAPON_MODES, k) ? WEAPON_MODES[k] : WEAPON_MODES.normal;
+
 // Versus only, and the host's call. A wave of enemies needs a player who can wall-jump out of a
 // corner and dash across a street; another player does not, and a duel decided by who is airborne
 // is not the game this map was drawn for. So a deathmatch runs on its own movement ladder, every

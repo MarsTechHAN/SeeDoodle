@@ -2,13 +2,13 @@
 import * as THREE from 'three';
 import { makeBody } from './physics.js';
 import { makeInkMaterial, INK } from './render.js';
-import { Rifle, Shotgun, Sniper, Katana, Rocket } from './weapons.js';
+import { Rifle, Shotgun, Sniper, Katana, Rocket, Grenade } from './weapons.js';
 // the dome shell and anything else flagged this way cannot be hooked
 const NO_GRAPPLE = (b) => !!b.data.noGrapple;
 const STAM_FIRE = 0.09, STAM_DRAIN = 0.08, STAM_GROUND = 0.4, STAM_AIR = 0.2, STAM_MIN = 0.18, STAM_PAUSE = 0.5, PARRY_WINDOW = 0.55;
 import { clamp, damp, rand, Spring, alignYAxis } from './util.js';
 import { audio } from './audio.js';
-import { OPT_DEFAULTS, diffOf, mobOf, MOB_FULL } from './settings.js';
+import { OPT_DEFAULTS, diffOf, mobOf, MOB_FULL, weaponModeOf } from './settings.js';
 
 const G = 26, WALK = 6.6, SPRINT = 10.6, CROUCH = 3.6, ACCEL = 140, FRICTION = 8, AIR_ACCEL = 36, AIR_CAP = 7.5, JUMP = 9.6;
 const STAND_H = 1.75, CROUCH_H = 1.05, EYE_STAND = 1.6, EYE_CROUCH = 0.88;
@@ -29,9 +29,10 @@ export class Player {
     this.aimOrigin = new THREE.Vector3(); this.aimFwd = new THREE.Vector3(0, 0, -1); this.aimRight = new THREE.Vector3(1, 0, 0);
     this.speed = 0; this.hurtFx = 0; this.flashFx = 0; this.lastDamageT = 10;
     this.rig = new THREE.Group(); this.camera.add(this.rig); ctx.scene.add(this.camera);
-    // The rocket goes on the end so every existing index (and `katanaIndex`) is untouched. It
-    // starts `locked`: in the list, but not on the HUD and not reachable until one drops.
-    this.weapons = [new Rifle(ctx), new Shotgun(ctx), new Sniper(ctx), new Katana(ctx), new Rocket(ctx)]; this.katanaIndex = 3; this.rocketIndex = 4;
+    // Keep these indices stable: snapshots and the numbered keys share them. Grenades get their
+    // own hand model for grenade-only matches; in ordinary matches they remain a side action.
+    this.weapons = [new Rifle(ctx), new Shotgun(ctx), new Sniper(ctx), new Katana(ctx), new Rocket(ctx), new Grenade(ctx)]; this.katanaIndex = 3; this.rocketIndex = 4; this.grenadeIndex = 5;
+    this.weaponRules = weaponModeOf();
     for (const w of this.weapons) { this.rig.add(w.root); if (w.isGun) w.startReserve = w.reserve; }
     this.weaponIndex = 0; this.weapon = this.weapons[0]; this.weapon.equip(); this.returnT = 0; this.prevWeaponIndex = 0;
     this.recoilPitch = new Spring(190, 17); this.recoilYaw = new Spring(190, 17); this.fovKick = new Spring(220, 14); this.landDip = new Spring(170, 15);
@@ -55,7 +56,9 @@ export class Player {
     this.hp = this.maxHp; this.alive = true; this.yaw = 0; this.pitch = 0; this.roll = 0; this.hurtFx = 0; this.flashFx = 0; this.crouching = false; this.sliding = false; this.deathT = 0; this.lastDamageT = 10; this.dashCd = 0; this.airJumps = 1; this.gravityScale = 1; this.dashLock = false;
     this.detachGrapple(false);
     for (const w of this.weapons) if (w.isGun) { w.mag = w.magSize; w.reserve = w.startReserve; w.reloading = false; w.pumpT = 0; w.relock(); }
-    this.switchTo(0, true); this.rig.visible = true; this.eyeH = EYE_STAND; this.grenades = 3; this.clearNades();
+    this.returnT = 0; this.nadeCd = 0; this.nadeCharge = 0; this._nadeHeld = false; if (this._arc) this.updateNadeArc(-1); this._aiming = false; this.firing = false;
+    const blade = this.weapons[this.katanaIndex]; blade.slashT = 0; blade.blocking = false; blade.blockAmt = 0; blade.cooldown = 0;
+    this.switchTo(this.weapons.findIndex((w, i) => !w.locked && this.weaponAllowed(i)), true); this.rig.visible = true; this.eyeH = EYE_STAND; this.grenades = this.grenadesAllowed ? 3 : 0; this.clearNades();
   }
   clearNades() { for (const n of this.nades) this.ctx.scene.remove(n.mesh); this.nades.length = 0; }
   get isBlocking() { return this.weapon.kind === 'katana' && this.weapon.blocking; }
@@ -99,16 +102,35 @@ export class Player {
     audio.dash(); this.kickFov(3);
   }
   switchTo(i, silent = false) {
-    if (i < 0 || i >= this.weapons.length || this.weapons[i].locked) return; if (i === this.weaponIndex && !silent) return;
+    if (!Number.isInteger(i) || !this.weaponAllowed(i) || this.weapons[i].locked) return; if (i === this.weaponIndex && !silent) return;
     if (this.weapon.kind !== 'katana') this.prevWeaponIndex = this.weaponIndex;
     this.weapon.unequip(); this.weaponIndex = i; this.weapon = this.weapons[i]; this.weapon.equip(); if (!silent) audio.switchWeapon();
     this.ctx.hud.setWeapon(this.weapon.name, this.weapon.hint); this.ctx.hud.setCrosshairMode(this.weapon.kind === 'katana' ? 'katana' : '');
   }
   cycleWeapon(step) {
     const n = this.weapons.length;
-    for (let k = 1; k <= n; k++) { const i = (this.weaponIndex + step * k + n * n) % n; if (!this.weapons[i].locked) { this.switchTo(i); return; } }
+    for (let k = 1; k <= n; k++) { const i = (this.weaponIndex + step * k + n * n) % n; if (!this.weapons[i].locked && this.weaponAllowed(i)) { this.switchTo(i); return; } }
   }
-  addAmmoAll(frac = 0.5) { for (const w of this.weapons) if (w.isGun && !w.locked) w.addAmmo(Math.round(w.maxReserve * frac)); }
+  weaponAllowed(indexOrKind) { const kind = typeof indexOrKind === 'number' ? this.weapons[indexOrKind]?.kind : indexOrKind; return this.weaponRules.weapons.includes(kind); }
+  get availableWeapons() { return this.weapons.filter((w, i) => !w.locked && this.weaponAllowed(i)); }
+  get grenadesAllowed() { return this.weaponRules.grenades; }
+  get infiniteGrenades() { return this.weaponRules.infiniteGrenades; }
+  applyWeaponMode(key) {
+    const next = weaponModeOf(key); if (next === this.weaponRules) return;
+    const previous = this.weaponRules; this.weaponRules = next;
+    this.weapons[this.grenadeIndex].locked = !this.weaponAllowed('grenade');
+    // A room rule change must cancel a charged throw, queued quick slash and scoped pose too.
+    this.nadeCharge = 0; this._nadeHeld = false; if (this._arc) this.updateNadeArc(-1);
+    this.returnT = 0; this.firing = false; this._aiming = false;
+    for (const w of this.weapons) { w.aimAmt = 0; if (w.isGun && !this.weaponAllowed(w.kind)) w.reloading = false; }
+    const blade = this.weapons[this.katanaIndex]; blade.slashT = 0; blade.blocking = false; blade.blockAmt = 0;
+    if (!this.grenadesAllowed) this.grenades = 0;
+    else if (!previous.grenades || this.infiniteGrenades) this.grenades = 3;
+    if (!this.weaponAllowed(this.weaponIndex) || this.weapon.locked) this.switchTo(this.weapons.findIndex((w, i) => !w.locked && this.weaponAllowed(i)), true);
+    this.prevWeaponIndex = this.weaponIndex;
+    this.ctx.hud.setAds(false); this.ctx.hud.setScope(false);
+  }
+  addAmmoAll(frac = 0.5) { for (const w of this.availableWeapons) if (w.isGun) w.addAmmo(Math.round(w.maxReserve * frac)); }
   // The whole difficulty ladder lands here: how fast and how late you heal, and whether your legs
   // run out. `sprint: 0` is EASY - unlimited, and the meter never appears.
   applyDifficulty(key) {
@@ -312,8 +334,10 @@ export class Player {
     this._updateCamera(dt);
     // ---- grenades ----
     this.nadeCd -= dt;
-    if (inp.down('grenade') && this.grenades > 0 && this.nadeCd <= 0 && this.alive && !this.dashLock) { this.nadeCharge = Math.min(1, this.nadeCharge + dt / 1.1); this._nadeHeld = true; }
-    else if (this._nadeHeld) { this._nadeHeld = false; if (this.grenades > 0 && this.nadeCd <= 0 && this.alive) this.throwGrenade(null, this.nadeCharge); this.nadeCharge = 0; }
+    const grenadeHeld = inp.down('grenade') || (this.weapon.kind === 'grenade' && inp.down('fire'));
+    const canThrow = this.grenadesAllowed && (this.infiniteGrenades || this.grenades > 0) && this.nadeCd <= 0;
+    if (grenadeHeld && canThrow && !this.dashLock) { this.nadeCharge = Math.min(1, this.nadeCharge + dt / 1.1); this._nadeHeld = true; }
+    else if (this._nadeHeld) { this._nadeHeld = false; if (!grenadeHeld && canThrow) this.throwGrenade(null, this.nadeCharge); this.nadeCharge = 0; }
     this.updateNadeArc(this._nadeHeld ? this.nadeCharge : -1);
     this.updateNades(dt);
     // ---- weapons ----
@@ -322,7 +346,7 @@ export class Player {
     if (inp.pressed('nextWeapon')) this.cycleWeapon(1);
     if (inp.pressed('prevWeapon')) this.cycleWeapon(-1);
     const st = this._weaponState(sprinting, aiming, hs2);
-    if (inp.pressed('melee') && this.weapon.kind !== 'katana') { this.switchTo(this.katanaIndex); this.returnT = 0.85; this.weapons[this.katanaIndex].startSlash(st); st.meleePressed = false; }
+    if (inp.pressed('melee') && this.weapon.kind !== 'katana' && this.weaponAllowed(this.katanaIndex)) { this.switchTo(this.katanaIndex); this.returnT = 0.85; this.weapons[this.katanaIndex].startSlash(st); st.meleePressed = false; }
     if (this.returnT > 0) { if (this.weapon.kind === 'katana' && (st.firePressed || st.aim || st.meleePressed)) this.returnT = 0; else { this.returnT -= dt; if (this.returnT <= 0) this.switchTo(this.prevWeaponIndex); } }
     this.firing = st.fire && this.weapon.isGun;
     this.weapon.animate(dt, st);
@@ -336,19 +360,26 @@ export class Player {
     vel.copy(this.forward).multiplyScalar(9 + 20 * charge).addScaledVector(this.body.vel, 0.5); vel.y += 3.5 + 2.5 * charge;
   }
   throwGrenade(remote = null, charge = 0) {
+    if (!this.grenadesAllowed || (!remote && (!this.alive || this.dashLock || this.nadeCd > 0 || (!this.infiniteGrenades && this.grenades <= 0)))) return false;
     const ctx = this.ctx; let pos, vel;
     if (remote) { pos = new THREE.Vector3().fromArray(remote.pos); vel = new THREE.Vector3().fromArray(remote.vel); }
     else {
-      this.grenades--; this.nadeCd = 0.55; pos = new THREE.Vector3(); vel = new THREE.Vector3(); this._nadeLaunch(charge, pos, vel);
+      if (!this.infiniteGrenades) this.grenades--; this.nadeCd = 0.55; pos = new THREE.Vector3(); vel = new THREE.Vector3(); this._nadeLaunch(clamp(charge, 0, 1), pos, vel);
       this.weapon.recoil.kick(-0.4, 0.5, 1.2); this.weapon.recoilRot.kick(-3, 0, -1.5); audio.grappleFire(); ctx.input.rumble(0.2, 0.4, 50);
       if (this.onThrow) this.onThrow({ pos: pos.toArray().map((v) => +v.toFixed(2)), vel: vel.toArray().map((v) => +v.toFixed(2)) });
     }
+    // Infinite supplies must not allocate a fresh set of GPU resources for every throw.
+    const visual = this._nadeVisual || (this._nadeVisual = {
+      body: new THREE.SphereGeometry(0.16, 8, 6), pin: new THREE.TorusGeometry(0.07, 0.02, 4, 8), cap: new THREE.CylinderGeometry(0.06, 0.06, 0.1, 6),
+      black: makeInkMaterial({ ink: INK.BLACK }), orange: makeInkMaterial({ ink: INK.ORANGE }),
+    });
     const g = new THREE.Group();
-    g.add(new THREE.Mesh(new THREE.SphereGeometry(0.16, 8, 6), makeInkMaterial({ ink: INK.BLACK })));
-    const pin = new THREE.Mesh(new THREE.TorusGeometry(0.07, 0.02, 4, 8), makeInkMaterial({ ink: INK.ORANGE })); pin.position.y = 0.2; g.add(pin);
-    const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 0.1, 6), makeInkMaterial({ ink: INK.ORANGE })); cap.position.y = 0.17; g.add(cap);
+    g.add(new THREE.Mesh(visual.body, visual.black));
+    const pin = new THREE.Mesh(visual.pin, visual.orange); pin.position.y = 0.2; g.add(pin);
+    const cap = new THREE.Mesh(visual.cap, visual.orange); cap.position.y = 0.17; g.add(cap);
     g.position.copy(pos); ctx.scene.add(g);
     this.nades.push({ mesh: g, pos, vel, ang: new THREE.Vector3(rand(-6, 6), rand(-6, 6), rand(-6, 6)), fuse: 1.7, mine: !remote, rest: false, tick: 0 });
+    return true;
   }
   updateNadeArc(charge) {
     if (!this._arc) {

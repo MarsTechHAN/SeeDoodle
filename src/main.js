@@ -12,13 +12,13 @@ import { Effects } from './effects.js';
 import { EnemyManager, BOSSES } from './enemies.js';
 import { Player } from './player.js';
 import { Bullets } from './bullets.js';
-import { RemotePlayer, encodeLocal } from './players.js';
+import { RemotePlayer, encodeLocal, PLAYER_INKS, validPlayerColor, playerInk, playerColorCSS } from './players.js';
 import { Net } from './net.js';
 import { HUD, CONTROLS_HTML } from './hud.js';
 import { isTouchDevice, TouchControls, TOUCH_CONTROLS_HTML } from './touch.js';
 import { t, ts, trDom, getLang, setLang, LANGS } from './i18n.js';
 import { audio } from './audio.js';
-import { SETTINGS, DIFFICULTY, MOBILITY, diffOf, mobOf, loadSettings, saveSettings } from './settings.js';
+import { SETTINGS, DIFFICULTY, MOBILITY, WEAPON_MODES, diffOf, mobOf, weaponModeOf, loadSettings, saveSettings } from './settings.js';
 import { rand, choose, clamp } from './util.js';
 
 const canvas = document.getElementById('c');
@@ -90,7 +90,8 @@ const bullets = ctx.bullets = new Bullets(ctx);
 player.name = myName;
 const net = new Net();
 const remote = new Map();      // peer id -> RemotePlayer
-const lobby = { players: new Map(), hostId: null, isPublic: true, status: '', code: '', map: null, gameMode: 'ffa', ballistics: false, diff: 'easy', mob: 'mid' };
+const lobby = { players: new Map(), hostId: null, isPublic: true, status: '', code: '', map: null, gameMode: 'ffa', ballistics: false, diff: 'easy', mob: 'mid', weaponMode: 'normal' };
+const colorSeats = new Map(); // recently departed ids -> { color, until }, shared with the next host
 const scores = new Map();      // peer id -> { name, kills, deaths }
 let screen = 'main';           // which start-screen panel is showing: main | online | lobby
 window.__game = { ctx, game, player, enemies, nav, world, level, hud, effects, input, net, remote, lobby, scores };
@@ -102,7 +103,8 @@ ctx.difficulty = () => (net.active ? lobby.diff : settings.difficulty) || 'easy'
 // The movement ladder is a deathmatch rule and nothing else: solo and squad play get `null`, which
 // is the full kit. In versus it is the host's pick, same as the map and the ballistics.
 ctx.mobility = () => (versus() ? lobby.mob || 'mid' : null);
-function applyRules() { player.applyDifficulty(ctx.difficulty()); player.applyMobility(ctx.mobility()); }
+ctx.weaponMode = () => net.connected ? weaponModeOf(lobby.weaponMode).key : 'normal';
+function applyRules() { player.applyDifficulty(ctx.difficulty()); player.applyMobility(ctx.mobility()); player.applyWeaponMode(ctx.weaponMode()); if (touch) touch.setWeaponMode(ctx.weaponMode()); }
 // anything a bullet or a blade can hit besides enemies
 ctx.targets = () => [player, ...remote.values()];
 // co-op is one team: your shots pass through your friends and only the enemies bleed
@@ -254,7 +256,9 @@ function makePickup(kind) {
 // host keeps broadcasting the death point and the wire format does not change - the client sees
 // the fall too. No floor within 60m (shot down over the edge of the page) means no floor at all:
 // leave it where it died and let `life` retire it, rather than dropping forever.
+function pickupAllowed(kind) { return kind === 'rocket' ? player.weaponAllowed('rocket') : kind !== 'ammo' || player.weapons.some((w) => w.isGun && player.weaponAllowed(w.kind)) || (player.grenadesAllowed && !player.infiniteGrenades); }
 function spawnPickup(kind, pos, id = null) {
+  if (!pickupAllowed(kind)) return null;
   const m = makePickup(kind); m.position.copy(pos); m.position.y += 0.6; R.scene.add(m);
   const gy = world.groundBelow(pos.x, pos.y + 1.2, pos.z, 60), rest = gy + 0.45;
   const grounded = gy > pos.y + 1.2 - 60 && rest < m.position.y - 0.02;
@@ -271,7 +275,7 @@ function collectPickup(p) {
     hud.kill(first ? '+ROCKET LAUNCHER · SLOT 5' : '+ROCKET ×2', 0);
     if (first) hud.tip('rocket launcher · slot 5 · armour comes apart', 4);
   }
-  else if (p.kind === 'ammo') { player.addAmmoAll(0.4); player.grenades = Math.min(player.maxGrenades, player.grenades + 1); hud.kill('+AMMO · +GRENADE', 0); } else { player.hp = Math.min(player.maxHp, player.hp + 35); hud.kill(level.key === 'mexico' ? 'TACO · +35 HP' : '+35 HP', 0); }
+  else if (p.kind === 'ammo') { player.addAmmoAll(0.4); if (player.grenadesAllowed && !player.infiniteGrenades) player.grenades = Math.min(player.maxGrenades, player.grenades + 1); hud.kill('+AMMO · +GRENADE', 0); } else { player.hp = Math.min(player.maxHp, player.hp + 35); hud.kill(level.key === 'mexico' ? 'TACO · +35 HP' : '+35 HP', 0); }
   audio.pickup(); effects.strokeBurst(p.mesh.position, PICKUP_INK[p.kind] || INK.GREEN, 12, 4, { life: 0.3 });
 }
 function updatePickups(dt) {
@@ -286,7 +290,7 @@ function updatePickups(dt) {
       }
     } else p.mesh.position.y = p.base + Math.sin(p.t * 2.5) * 0.12;
     p.mesh.rotation.y += dt * 1.8;
-    if (player.alive && p.mesh.position.distanceTo(player.center) < 1.5) {
+    if (player.alive && pickupAllowed(p.kind) && p.mesh.position.distanceTo(player.center) < 1.5) {
       collectPickup(p); removePickup(p);
       if (net.active) net.send(net.isHost ? 'taken' : 'take', { id: p.id });
       continue;
@@ -342,9 +346,9 @@ const MODIFIERS = [
 ];
 const tips = () => [
   t`hold <b>${hud.key('grapple')}</b> to reel in · tap it again to let go mid-swing`,
-  t`block with <b>${hud.key('block')}</b> and some of their bullets go back at them`,
+  player.weaponAllowed('katana') ? t`block with <b>${hud.key('block')}</b> and some of their bullets go back at them` : ts('hold fire or grenade to aim - release to throw'),
   ts('kills in the air are worth more · stay off the floor'),
-  t`<b>${hud.key('grenade')}</b> lobs a grenade · pickups give you more`,
+  player.infiniteGrenades ? ts('unlimited grenades - hold fire and release to throw') : player.grenadesAllowed ? t`<b>${hud.key('grenade')}</b> lobs a grenade · pickups give you more` : ts('slash · hold aim to block & return bullets'),
   t`press <b>${hud.key('jump')}</b> again in the air for a double jump`,
 ];
 const bossFor = (n) => BOSSES[(Math.floor(n / 5) - 1) % BOSSES.length];
@@ -374,7 +378,7 @@ function startWave(n) {
   audio.wave();
   if (coopHost()) coopBroadcastWave({ banner: sub, mod: mod.name, boss });
   if (n <= tips().length) hud.tip(tips()[n - 1], 7);
-  player.grenades = Math.min(player.maxGrenades, player.grenades + 1);
+  if (player.grenadesAllowed && !player.infiniteGrenades) player.grenades = Math.min(player.maxGrenades, player.grenades + 1);
   const drops = coop() ? 5 + 2 * teamSize() : 7;
   for (let i = 0; i < drops; i++) spawnPickup(i < Math.ceil(drops * 0.7) ? 'ammo' : 'health', choose(level.pickups));
   if (n >= 5 && n % 5 === 0 && n > checkpoint) { checkpoint = n; localStorage.setItem('doodle_checkpoint', String(n)); hud.kill(t`CHECKPOINT · WAVE ${n}`, 0); }
@@ -459,7 +463,7 @@ function focusCandidate() {
   return best;
 }
 function enterFocus() {
-  if (online() || game.focus.chain >= FOCUS_MAX_CHAIN || !focusCandidate()) return;
+  if (online() || !player.weaponAllowed('katana') || game.focus.chain >= FOCUS_MAX_CHAIN || !focusCandidate()) return;
   const fresh = !game.focus.active;
   game.focus.active = true; game.focus.t = FOCUS_TIME; game.focus.chain++; game.focus.arm = FOCUS_ARM; game.focus.ready = false;
   if (fresh) { audio.focusIn(); hud.tip(t`<b>SLASH READY</b> · hold ${hud.key('focus')} to dash`, 2.2); }
@@ -488,6 +492,7 @@ function updateFocusDash(dt) {
 }
 function endDash(blocked) { player.dashLock = false; game.focus.dash = null; player.body.vel.set(0, 0, 0); if (blocked) { player.weapons[player.katanaIndex].startSlash(player._weaponState(false, false, 0)); audio.katanaSwing(); hud.tip('blocked · the dash did not reach', 1.2); } }
 function focusExecute(target) {
+  if (!player.weaponAllowed('katana')) { endFocus(); return; }
   player.dashLock = false; game.focus.dash = null; player.body.vel.set(0, 0, 0);
   player.weapons[player.katanaIndex].startSlash(player._weaponState(false, false, 0));
   _fv.subVectors(target.center, player.eye); const dir = _fv.clone().normalize(); const chainBefore = game.focus.chain;
@@ -548,13 +553,14 @@ function tallyDeath(victim, killer) {
 function sendScores() { const rows = [...scores.entries()].map(([id, s]) => ({ id, ...s })); net.send('score', rows); applyScores(rows); }
 function applyScores(rows) { scores.clear(); for (const r of rows) scores.set(r.id, { name: r.name, kills: r.kills, deaths: r.deaths }); refreshScoreHud(); }
 function sortedScores() { return [...scores.entries()].sort((a, b) => b[1].kills - a[1].kills || a[1].deaths - b[1].deaths); }
+function playerNameHTML(id, name, markMe = false) { return `<span class="player-name" style="--player-color:${playerColorCSS(lobby.players.get(id)?.color)}"><i class="player-swatch" aria-hidden="true"></i>${esc(name)}${markMe && id === net.id ? ts(' (you)') : ''}</span>`; }
 function refreshScoreHud() {
   if (!online()) return;
   // co-op keeps its own panel: one team score, and who is still on their feet
   if (coop()) { coopHudTick(0); if (!hud.el.board.hidden) hud.setBoard(boardHTML()); return; }
   const rows = sortedScores(); const top = rows.slice(0, 3); const myIdx = rows.findIndex(([id]) => id === net.id);
   if (myIdx >= 3) top.push(rows[myIdx]);
-  hud.setPvpScore(top.map(([id, sc]) => `<div class="row${id === net.id ? ' me' : ''}"><span class="rank">${rows.findIndex(([x]) => x === id) + 1}.</span><span>${esc(sc.name)}${id === net.id ? ts(' (you)') : ''}</span><b>${sc.kills}</b></div>`).join('') + `<div class="target">${t`first to ${FFA_TARGET}`}</div>`);
+  hud.setPvpScore(top.map(([id, sc]) => `<div class="row${id === net.id ? ' me' : ''}"><span class="rank">${rows.findIndex(([x]) => x === id) + 1}.</span>${playerNameHTML(id, sc.name, true)}<b>${sc.kills}</b></div>`).join('') + `<div class="target">${t`first to ${FFA_TARGET}`}</div>`);
   hud.setModifier('');
   if (!hud.el.board.hidden) hud.setBoard(boardHTML());
 }
@@ -569,7 +575,7 @@ function pingCell(id) {
 }
 function boardHTML(title = null) {
   const rows = sortedScores(); const code = String(net.aliasCode || net.code || '').replace(/-\d+$/, '');
-  const line = (id, s, tail) => `<div class="${id === net.id ? 'me' : ''}"><span>${s.name}${id === net.id ? ts(' (you)') : ''}</span><span class="tail">${tail}</span>${pingCell(id)}</div>`;
+  const line = (id, s, tail) => `<div class="${id === net.id ? 'me' : ''}">${playerNameHTML(id, s.name, true)}<span class="tail">${tail}</span>${pingCell(id)}</div>`;
   if (coop()) {
     return `<h3>${ts(title || 'SQUAD SURVIVAL')}</h3>${rows.map(([id, s]) => line(id, s, t`${s.kills} kills · ${s.deaths} downs`)).join('')}<div class="foot">${t`wave ${game.wave} · ${game.score} points · ${enemies.alive + game.queue.length} left · lobby ${code}`}</div>`;
   }
@@ -586,13 +592,13 @@ function endMatch(winner) {
   const title = winner.coop ? ts('SQUAD WIPED') : winner.id === net.id ? ts('YOU WIN') : t`${winner.name || ts('someone')} WINS`;
   const sub = winner.coop ? `<div class="go">${t`you held the page to wave ${winner.wave || game.wave} · ${winner.score ?? game.score} points`}</div>` : '';
   const tail = winner.coop ? (s) => t`${s.kills} kills · ${s.deaths} downs` : (s) => t`${s.kills} K · ${s.deaths} D`;
-  hud.setGameplayVisible(false); hud.showScreen(`<h1>${title}</h1>${sub}<div class="scoreboard">${sortedScores().map(([id, s]) => `<div class="${id === net.id ? 'me' : ''}"><span>${s.name}</span><span>${tail(s)}</span></div>`).join('')}</div><div class="go" id="overGo">${ts('back to the lobby in a moment…')}</div>`);
+  hud.setGameplayVisible(false); hud.showScreen(`<h1>${title}</h1>${sub}<div class="scoreboard">${sortedScores().map(([id, s]) => `<div class="${id === net.id ? 'me' : ''}">${playerNameHTML(id, s.name)}<span>${tail(s)}</span></div>`).join('')}</div><div class="go" id="overGo">${ts('back to the lobby in a moment…')}</div>`);
 }
 
 // ---------------- networking ----------------
-function addRemote(id, name) {
-  if (remote.has(id)) { const r = remote.get(id); r.name = name; return r; }
-  const rp = new RemotePlayer(ctx, id, name, 0, INK.RED);
+function addRemote(id, name, color) {
+  if (remote.has(id)) { const r = remote.get(id); r.name = name; r.setInk(playerInk(color)); return r; }
+  const rp = new RemotePlayer(ctx, id, name, 0, playerInk(color));
   rp.onDamage = (t, amount, fromPos) => {
     if (!t.alive || amount <= 0) return;
     const at = fromPos ? fromPos.toArray().map((v) => +v.toFixed(1)) : null;
@@ -607,9 +613,36 @@ function addRemote(id, name) {
   };
   remote.set(id, rp); return rp;
 }
-function removeRemote(id) { const r = remote.get(id); if (r) { r.dispose(); remote.delete(id); } lobby.players.delete(id); scores.delete(id); stalled.delete(id); }
-function lobbyRows() { return [...lobby.players.entries()].map(([id, p]) => ({ id, name: p.name })); }
-function broadcastLobby() { net.send('lobby', { players: lobbyRows(), hostId: net.id, isPublic: lobby.isPublic, map: lobby.map || mapKey, mode: lobby.gameMode, bal: !!lobby.ballistics, diff: ctx.difficulty(), mob: lobby.mob, shown: net.aliasCode || net.code }); renderLobby(); }
+function removeRemote(id) {
+  const p = lobby.players.get(id); if (p && validPlayerColor(p.color)) colorSeats.set(id, { color: p.color, until: Date.now() + 60000 });
+  const r = remote.get(id); if (r) { r.dispose(); remote.delete(id); } lobby.players.delete(id); scores.delete(id); stalled.delete(id);
+}
+function lobbyRows() { return [...lobby.players.entries()].map(([id, p]) => ({ id, name: p.name, color: p.color })); }
+function reservedColors() { for (const [id, seat] of colorSeats) if (seat.until <= Date.now()) colorSeats.delete(id); return [...colorSeats.entries()].map(([id, seat]) => ({ id, ...seat })); }
+// Leaving never renumbers the remaining seats. Keep a departed colour warm for automatic rejoin,
+// including when that player was the host; reservations travel with the roster to its successor.
+function assignPlayerColor(id, prev) {
+  const used = new Set([...lobby.players.entries()].filter(([pid]) => pid !== id && pid !== prev).map(([, p]) => p.color));
+  const held = new Set(reservedColors().map((p) => p.color));
+  const preferred = lobby.players.get(id)?.color ?? colorSeats.get(id)?.color ?? lobby.players.get(prev)?.color ?? colorSeats.get(prev)?.color;
+  if (validPlayerColor(preferred) && !used.has(preferred)) return preferred;
+  const fresh = PLAYER_INKS.findIndex((_, slot) => !used.has(slot) && !held.has(slot));
+  return fresh >= 0 ? fresh : PLAYER_INKS.findIndex((_, slot) => !used.has(slot));
+}
+function applyLobbyPlayers(rows, reservations) {
+  const ids = new Set(rows.map((p) => p.id));
+  for (const id of [...lobby.players.keys()]) if (!ids.has(id)) removeRemote(id);
+  if (Array.isArray(reservations)) { colorSeats.clear(); for (const p of reservations) if (validPlayerColor(p.color) && p.until > Date.now()) colorSeats.set(p.id, { color: p.color, until: p.until }); }
+  const previous = new Map(lobby.players); lobby.players.clear(); lobby.order = rows.map((p) => p.id);
+  for (const p of rows) lobby.players.set(p.id, { name: p.name, color: validPlayerColor(p.color) ? p.color : previous.get(p.id)?.color ?? 0 });
+  for (const [id, p] of lobby.players) {
+    colorSeats.delete(id);
+    if (id !== net.id) addRemote(id, p.name, p.color);
+    else { player.color = p.color; player.ink = playerInk(p.color); }
+  }
+  for (const id of [...remote.keys()]) if (!lobby.players.has(id) || id === net.id) { const r = remote.get(id); r.dispose(); remote.delete(id); }
+}
+function broadcastLobby() { net.send('lobby', { players: lobbyRows(), colors: reservedColors(), hostId: net.id, isPublic: lobby.isPublic, map: lobby.map || mapKey, mode: lobby.gameMode, bal: !!lobby.ballistics, diff: ctx.difficulty(), mob: lobby.mob, weaponMode: ctx.weaponMode(), shown: net.aliasCode || net.code }); renderLobby(); }
 const inMatch = () => ['play', 'dying', 'over'].includes(game.state);
 let boardT = 0;   // seconds since the open scoreboard was last redrawn
 net.onPeerLeave = (id) => { const nm = (lobby.players.get(id) || {}).name; removeRemote(id); broadcastLobby(); if (inMatch()) { hud.kill(t`${nm || ts('someone')} left`, 0); sendScores(); } };
@@ -618,7 +651,17 @@ net.onDisconnect = (reason) => leaveOnline(reason || 'lost the connection to the
 // seconds while the socket is rebuilt, so the figure stays standing and we just say what happened;
 // only when the seat really expires does `gone` arrive and the ordinary leave path run.
 const stalled = new Set();
-net.onStall = (quiet) => { if (inMatch() || game.state === 'lobby') hud.kill(quiet ? 'connection lost — reconnecting…' : 'reconnected', 0); };
+net.onStall = (quiet, res) => {
+  if (inMatch() || game.state === 'lobby') hud.kill(quiet ? 'connection lost — reconnecting…' : 'reconnected', 0);
+  if (quiet || !res) return;
+  if (net.isHost) {
+    const members = res?.members || [];
+    for (const id of [...lobby.players.keys()]) if (!members.some((p) => p.id === id)) removeRemote(id);
+    for (const p of members) if (p.id !== net.id && !lobby.players.has(p.id)) net.onPeerJoin(p.id, { name: p.name });
+    broadcastLobby();
+  } else net.send('lobbyreq', {});
+};
+net.on('lobbyreq', () => { if (net.isHost) broadcastLobby(); });
 net.onPeerStall = (id, quiet) => {
   const nm = (lobby.players.get(id) || {}).name || 'someone';
   if (quiet) stalled.add(id); else stalled.delete(id);
@@ -652,26 +695,27 @@ net.on('refused', (d) => leaveOnline(d.reason));
 net.hostName = myName;
 net.onPeerJoin = (from, meta) => {
   const name = String(meta && meta.name || 'doodle').slice(0, 14);
-  if (meta && meta.prev && meta.prev !== from) { const sc = scores.get(meta.prev); if (sc) { scores.delete(meta.prev); scores.set(from, sc); } const r = remote.get(meta.prev); if (r) r.dispose(); remote.delete(meta.prev); lobby.players.delete(meta.prev); if (lobby.order) lobby.order = lobby.order.filter((id) => id !== meta.prev); }
-  lobby.players.set(from, { name }); addRemote(from, name); broadcastLobby();
+  const prev = meta && meta.prev !== from && !net.conns.has(meta.prev) ? meta.prev : null;
+  const color = assignPlayerColor(from, prev);
+  if (prev) { const sc = scores.get(prev); if (sc) { scores.delete(prev); scores.set(from, sc); } const r = remote.get(prev); if (r) r.dispose(); remote.delete(prev); lobby.players.delete(prev); colorSeats.delete(prev); if (lobby.order) lobby.order = lobby.order.filter((id) => id !== prev); }
+  colorSeats.delete(from); lobby.players.set(from, { name, color }); addRemote(from, name, color); broadcastLobby();
   if (game.state === 'play' || game.state === 'dying') {
     if (!scores.has(from)) scores.set(from, { name, kills: 0, deaths: 0 });
-    net.sendTo(from, 'start', { late: true, spawn: farthestSpawnIndex(), map: lobby.map || mapKey, mode: game.mode, bal: !!lobby.ballistics, diff: ctx.difficulty(), mob: lobby.mob, broken: level.breakables.filter((b) => !b.alive).map((b) => b.id) });
+    net.sendTo(from, 'start', { late: true, players: lobbyRows(), colors: reservedColors(), spawn: farthestSpawnIndex(), map: lobby.map || mapKey, mode: game.mode, bal: !!lobby.ballistics, diff: ctx.difficulty(), mob: lobby.mob, weaponMode: ctx.weaponMode(), broken: level.breakables.filter((b) => !b.alive).map((b) => b.id) });
     // a latecomer has an empty world until it is told what is already standing in it
     if (coopHost()) setTimeout(() => sendCoopCatchUp(from), 350);
     sendScores(); hud.kill(t`${name} joined`, 0);
   }
 };
-net.on('lobby', (d) => {
-  lobby.hostId = d.hostId; lobby.isPublic = !!d.isPublic; lobby.code = net.code; lobby.shown = d.shown || net.code; if (d.map) lobby.map = knownMap(d.map); lobby.gameMode = d.mode === 'coop' ? 'coop' : 'ffa'; lobby.ballistics = !!d.bal; if (d.mob) lobby.mob = d.mob; if (d.diff) lobby.diff = d.diff; if (d.diff || d.mob) applyRules(); lobby.order = d.players.map((p) => p.id); lobby.players.clear();
-  for (const p of d.players) lobby.players.set(p.id, { name: p.name });
-  for (const p of d.players) if (p.id !== net.id) addRemote(p.id, p.name);
-  for (const id of [...remote.keys()]) if (!lobby.players.has(id)) removeRemote(id);
+net.on('lobby', (d, from) => {
+  if (net.isHost || from !== net.hostId || !Array.isArray(d.players)) return;
+  lobby.hostId = d.hostId; lobby.isPublic = !!d.isPublic; lobby.code = net.code; lobby.shown = d.shown || net.code; if (d.map) lobby.map = knownMap(d.map); lobby.gameMode = d.mode === 'coop' ? 'coop' : 'ffa'; lobby.ballistics = !!d.bal; if (d.mob) lobby.mob = d.mob; if (d.diff) lobby.diff = d.diff; lobby.weaponMode = weaponModeOf(d.weaponMode).key; applyRules();
+  applyLobbyPlayers(d.players, d.colors);
   if (inMatch()) { for (const p of d.players) if (!scores.has(p.id)) scores.set(p.id, { name: p.name, kills: 0, deaths: 0 }); refreshScoreHud(); }
   renderLobby();
 });
 net.on('leave', (d) => { const nm = (lobby.players.get(d.id) || {}).name; removeRemote(d.id); if (inMatch()) hud.kill(t`${nm || ts('someone')} left`, 0); renderLobby(); });
-net.on('start', (d) => { if (net.isHost) return; if (d.map) lobby.map = knownMap(d.map); if (d.bal !== undefined) lobby.ballistics = !!d.bal; if (d.diff) lobby.diff = d.diff; if (d.mob) lobby.mob = d.mob; startMatch(!!d.late, d.spawns ? d.spawns[net.id] : d.spawn, d.mode === 'coop' ? 'coop' : 'ffa'); if (d.broken) for (const id of d.broken) { const br = level.breakables[id]; if (br) breakProp(br, null, false, true); } });
+net.on('start', (d, from) => { if (net.isHost || from !== net.hostId) return; if (d.players) applyLobbyPlayers(d.players, d.colors); if (d.map) lobby.map = knownMap(d.map); if (d.bal !== undefined) lobby.ballistics = !!d.bal; if (d.diff) lobby.diff = d.diff; if (d.mob) lobby.mob = d.mob; lobby.weaponMode = weaponModeOf(d.weaponMode).key; startMatch(!!d.late, d.spawns ? d.spawns[net.id] : d.spawn, d.mode === 'coop' ? 'coop' : 'ffa'); if (d.broken) for (const id of d.broken) { const br = level.breakables[id]; if (br) breakProp(br, null, false, true); } });
 net.on('startreq', () => { if (net.isHost && game.state === 'lobby') hostStart(); });
 
 // ---------------- co-op: the host owns the enemies, everyone else mirrors them ----------------
@@ -737,7 +781,7 @@ function coopHudTick(dt) {
 function coopBoardRows() {
   const rows = [...scores.entries()].sort((a, b) => b[1].kills - a[1].kills);
   const down = (id) => (id === net.id ? !player.alive : !(remote.get(id) || { alive: true }).alive);
-  return rows.slice(0, 4).map(([id, sc]) => `<div class="row${id === net.id ? ' me' : ''}${down(id) ? ' down' : ''}"><span class="rank">${down(id) ? '✕' : '·'}</span><span>${esc(sc.name)}${id === net.id ? ts(' (you)') : ''}</span><b>${sc.kills}</b></div>`).join('')
+  return rows.slice(0, 4).map(([id, sc]) => `<div class="row${id === net.id ? ' me' : ''}${down(id) ? ' down' : ''}"><span class="rank">${down(id) ? '✕' : '·'}</span>${playerNameHTML(id, sc.name, true)}<b>${sc.kills}</b></div>`).join('')
     + `<div class="target">wave ${game.wave} · ${game.score} pts</div>`;
 }
 // everything already standing, for someone who just walked in
@@ -857,7 +901,8 @@ function coopUpdate(dt) {
   if (bodies.length && bodies.every((p) => !p.alive)) { const w = { id: null, name: null, coop: true, wave: game.wave, score: game.score }; net.send('end', w); endMatch(w); }
 }
 function leaveOnline(reason) {
-  net.leave(); for (const id of [...remote.keys()]) removeRemote(id); lobby.players.clear(); scores.clear(); hud.setBoard(null);
+  net.leave(); for (const id of [...remote.keys()]) removeRemote(id); lobby.players.clear(); colorSeats.clear(); scores.clear(); hud.setBoard(null);
+  player.applyWeaponMode('normal'); if (touch) touch.setWeaponMode('normal');
   if (game.state !== 'start') { game.state = 'start'; game.mode = 'solo'; setArena(false); resetGame(); hud.setGameplayVisible(false); }
   game.menu = false; lobby.status = reason || ''; screen = 'online'; showStart();
 }
@@ -865,7 +910,7 @@ async function createLobby(isPublic) {
   setStatus('opening a lobby…');
   try { await net.host({ isPublic }); }
   catch (err) { setStatus(friendlyError(err)); unlockButtons(); return; }
-  lobby.isPublic = isPublic; lobby.map = mapKey; lobby.ballistics = settings.ballistics; lobby.diff = settings.difficulty; lobby.mob = lobby.mob || 'mid'; lobby.players.clear(); lobby.players.set(net.id, { name: myName }); lobby.hostId = net.id; lobby.status = '';
+  lobby.isPublic = isPublic; lobby.map = mapKey; lobby.ballistics = settings.ballistics; lobby.diff = settings.difficulty; lobby.mob = lobby.mob || 'mid'; lobby.players.clear(); colorSeats.clear(); lobby.players.set(net.id, { name: myName, color: 0 }); player.color = 0; player.ink = playerInk(0); lobby.hostId = net.id; lobby.status = ''; lobby.weaponMode = 'normal'; applyRules();
   game.state = 'lobby'; screen = 'lobby'; showStart();
 }
 async function joinLobby(code) {
@@ -1034,6 +1079,9 @@ function ballHTML(sel, canPick) {
   ];
   return `<div class="modesel" id="ballsel"><span>shots</span>${opts.map((o) => `<button type="button" class="modebtn${o.on === !!sel ? ' on' : ''}" data-bal="${o.on ? '1' : '0'}" ${canPick ? '' : 'disabled'}>${o.name}<i>${o.blurb}</i></button>`).join('')}</div>`;
 }
+function weaponModeHTML(selected, canPick) {
+  return `<div class="modesel weapon-modes" id="weaponsel"><span>${ts('weapon mode')}</span>${Object.entries(WEAPON_MODES).map(([key, rule]) => `<button type="button" class="modebtn${key === selected ? ' on' : ''}" data-weapons="${key}" aria-pressed="${key === selected}" ${canPick ? '' : 'disabled'}>${ts(rule.name)}<i>${ts(rule.blurb)}</i></button>`).join('')}</div>`;
+}
 function lobbyHTML() {
   const rows = lobbyRows(); const host = net.isHost; const n = rows.length; const isCoop = lobby.gameMode === 'coop';
   const blurb = isCoop ? ts('squad survival · you against the page') : t`free for all · first to ${FFA_TARGET}`;
@@ -1041,12 +1089,13 @@ function lobbyHTML() {
     <div class="online" id="online">
       <div class="row"><span>code</span><span class="code">${String(net.isHost ? (net.aliasCode || net.code) : (lobby.shown || net.code) || '').replace(/-\d+$/, '')}</span></div>
       ${modeHTML(lobby.gameMode, host)}
+      ${weaponModeHTML(ctx.weaponMode(), host)}
       ${mapHTML(playable(lobby.map || mapKey, !isCoop), host, !isCoop)}
       ${ballHTML(lobby.ballistics, host)}
       ${diffHTML(ctx.difficulty(), host)}
       ${isCoop ? '' : mobHTML(lobby.mob || 'mid', host)}
       <div class="hint">${lobby.isPublic ? 'this lobby is public: anyone can quick play in, or type the code' : 'private lobby: friends type this code under PLAY ONLINE → JOIN'}</div>
-      <div class="plist">${rows.map((p) => `<div class="${p.id === lobby.hostId ? 'host' : ''}${p.id === net.id ? ' me' : ''}"><span>${esc(p.name)}</span><span>${p.id === net.id ? 'you' : ''}</span></div>`).join('')}</div>
+      <div class="plist">${rows.map((p) => `<div class="${p.id === lobby.hostId ? 'host' : ''}${p.id === net.id ? ' me' : ''}">${playerNameHTML(p.id, p.name)}<span>${p.id === net.id ? 'you' : ''}</span></div>`).join('')}</div>
       <div class="row"><button type="button" class="big" id="startBtn">START MATCH</button><button type="button" class="alt" id="leaveBtn">LEAVE</button></div>
       <div class="status" id="status">${esc(lobby.status || '')}</div><div class="hint">${(() => { const tail = n < 2 ? ts('people can still join once it is running') : t`${n} players in`; return host ? t`anyone can start · ${tail}` : t`anyone can start · only the host picks the mode and map · ${tail}`; })()}</div>
     </div>`;
@@ -1071,6 +1120,7 @@ function wireOnline() {
   if (q('createBtn')) q('createBtn').addEventListener('click', () => { lockButtons(box); createLobby(box.querySelector('input[name=vis]:checked').value === 'public'); });
   if (q('joinBtn')) { q('joinBtn').addEventListener('click', () => { const c = q('codeBox').value.trim().toUpperCase(); if (!c) { setStatus('type the code your friend gave you'); return; } lockButtons(box); joinLobby(c); }); q('codeBox').addEventListener('keydown', (e) => { if (e.key === 'Enter') q('joinBtn').click(); }); }
   if (q('modesel')) q('modesel').addEventListener('click', (e) => { const b = e.target.closest('.modebtn'); if (!b || b.disabled || !net.isHost) return; lobby.gameMode = b.dataset.mode === 'coop' ? 'coop' : 'ffa'; lobby.map = playable(lobby.map || mapKey, lobby.gameMode !== 'coop'); broadcastLobby(); });
+  if (q('weaponsel')) q('weaponsel').addEventListener('click', (e) => { const b = e.target.closest('.modebtn'); if (!b || b.disabled || !net.isHost || game.state !== 'lobby') return; lobby.weaponMode = weaponModeOf(b.dataset.weapons).key; applyRules(); broadcastLobby(); });
   if (q('ballsel')) q('ballsel').addEventListener('click', (e) => { const b = e.target.closest('.modebtn'); if (!b || b.disabled || !net.isHost) return; lobby.ballistics = b.dataset.bal === '1'; broadcastLobby(); });
   if (q('diffsel')) q('diffsel').addEventListener('click', (e) => { const b = e.target.closest('.modebtn'); if (!b || b.disabled || !net.isHost) return; lobby.diff = b.dataset.diff; applyRules(); broadcastLobby(); });
   if (q('mobsel')) q('mobsel').addEventListener('click', (e) => { const b = e.target.closest('.modebtn'); if (!b || b.disabled || !net.isHost) return; lobby.mob = b.dataset.mob; applyRules(); broadcastLobby(); });
@@ -1100,7 +1150,7 @@ function showStart() {
 function showPause() {
   redraw = showPause; cfgBack = null;
   if (online()) {
-    hud.showScreen(`<h1>MENU</h1><h2>${t`free for all · lobby ${String(net.aliasCode || net.code || '').replace(/-\d+$/, '')}`}</h2><div class="scoreboard">${sortedScores().map(([id, s]) => `<div class="${id === net.id ? 'me' : ''}"><span>${esc(s.name)}</span><span>${t`${s.kills} K · ${s.deaths} D`}</span></div>`).join('')}</div>${CONTROLS_HTML}${settingsHTML()}<div class="online" id="online"><div class="row"><button type="button" class="alt" id="leaveBtn">LEAVE MATCH</button></div></div><div class="go">${goText(ts('KEEP PLAYING'))}</div>`);
+    hud.showScreen(`<h1>MENU</h1><h2>${t`free for all · lobby ${String(net.aliasCode || net.code || '').replace(/-\d+$/, '')}`}</h2><div class="scoreboard">${sortedScores().map(([id, s]) => `<div class="${id === net.id ? 'me' : ''}">${playerNameHTML(id, s.name)}<span>${t`${s.kills} K · ${s.deaths} D`}</span></div>`).join('')}</div>${CONTROLS_HTML}${settingsHTML()}<div class="online" id="online"><div class="row"><button type="button" class="alt" id="leaveBtn">LEAVE MATCH</button></div></div><div class="go">${goText(ts('KEEP PLAYING'))}</div>`);
     wireSettings(); wireOnline(); return;
   }
   hud.showScreen(`<h1>PAUSED</h1><h2>${t`wave ${game.wave} · score ${game.score}`}</h2>${CONTROLS_HTML}${settingsHTML()}${menuBtnHTML()}<div class="go">${goText(ts('RESUME'))}</div>`);
@@ -1143,7 +1193,7 @@ function hostStart() {
   // deal everyone a different spot, shuffled so the same people do not always start together
   setArena(mode === 'ffa'); const order = spawnSpots().map((_, i) => i); for (let i = order.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; }
   const spawns = {}; [...lobby.players.keys()].forEach((id, i) => { spawns[id] = order[i % order.length]; });
-  net.send('start', { spawns, map: lobby.map || mapKey, mode, bal: !!lobby.ballistics, diff: ctx.difficulty(), mob: lobby.mob }); startMatch(false, spawns[net.id], mode); sendScores();
+  net.send('start', { spawns, players: lobbyRows(), colors: reservedColors(), map: lobby.map || mapKey, mode, bal: !!lobby.ballistics, diff: ctx.difficulty(), mob: lobby.mob, weaponMode: ctx.weaponMode() }); startMatch(false, spawns[net.id], mode); sendScores();
   if (mode === 'coop') startWave(1);
 }
 function startMatch(late, spawnIdx, mode = 'ffa') {
@@ -1158,7 +1208,8 @@ function startMatch(late, spawnIdx, mode = 'ffa') {
   refreshScoreHud();
   if (isCoop) hud.message('SQUAD SURVIVAL', late ? 'you joined a run in progress' : teamSize() + ' of you against the page · they come harder in a crowd', 3);
   else hud.message('FREE FOR ALL', late ? 'you joined a match in progress' : 'first to ' + FFA_TARGET + ' · ' + Math.round(FFA_TIME / 60) + ' minutes · everyone is fair game', 3);
-  hud.tip(`hold <b>${hud.key('score')}</b> for the scoreboard`, 5);
+  const rule = weaponModeOf(ctx.weaponMode());
+  hud.tip(rule.key === 'normal' ? `hold <b>${hud.key('score')}</b> for the scoreboard` : `${ts(rule.name)} · ${ts(rule.blurb)}`, 5);
   // Say out loud what the legs can do this match. A dash that silently does nothing reads as a bug.
   if (!isCoop) setTimeout(() => { if (game.state === 'play') hud.tip(ts('movement') + ': <b>' + ts(mobOf(ctx.mobility()).name) + '</b> · ' + ts(mobOf(ctx.mobility()).blurb), 4); }, 5200);
   // a match started by someone else's click cannot grab the mouse: ask for a click
@@ -1256,13 +1307,16 @@ function step(now) {
   else hud.setCycle(0, '');
   // A weapon you have not found yet has no slot. The rocket is last in the list, so dropping it
   // leaves every other slot on the number it has always been on.
-  const slotState = player.weapons.map((wp, i) => ({ name: wp.name, active: i === player.weaponIndex, ammo: wp.isGun ? wp.mag + '/' + wp.reserve : '∞', empty: wp.isGun && wp.mag === 0 && wp.reserve === 0, locked: wp.locked })).filter((s) => !s.locked);
+  const slotState = player.weapons.map((wp, i) => ({ slot: i + 1, key: wp.kind === 'grenade' ? hud.key('grenade') : String(i + 1), name: wp.name, active: i === player.weaponIndex, ammo: wp.isGun ? wp.mag + '/' + wp.reserve : '∞', empty: wp.isGun && wp.mag === 0 && wp.reserve === 0, locked: wp.locked || !player.weaponAllowed(i) })).filter((s) => !s.locked);
   hud.setSlots(slotState); if (touch) touch.setSlots(slotState);
-  hud.setGrenades(player.grenades); hud.setGrappleStamina(player.grapStam); hud.setHealth(player.hp, player.maxHp); hud.setSpread(w.spreadPx); hud.update(dt);
+  hud.setWeaponMode(online() ? weaponModeOf(ctx.weaponMode()).name : null);
+  hud.setGrenades(player.infiniteGrenades ? Infinity : player.grenadesAllowed ? player.grenades : 0); hud.setGrappleStamina(player.grapStam); hud.setHealth(player.hp, player.maxHp); hud.setSpread(w.spreadPx); hud.update(dt);
   if (online()) hud.setFocusMeter(playing, player.grapStam, false, 'GRAPPLE');
   else hud.setFocusMeter(playing && (w.kind === 'katana' || game.katanaStreak > 0 || game.focus.active), game.focus.active ? 1 : clamp(game.katanaStreak / KATANA_CHARGE_KILLS, 0, 1), game.focus.active, 'KATANA');
   if (game.boss) { if (game.boss.alive) hud.setBoss(game.boss.T.name, game.boss.hp / game.boss.maxHp); else { hud.setBoss(null, null); game.boss = null; } }
   audio.setIntensity(clamp((enemies.alive + game.queue.length + remote.size * 2) / 12, 0, 1) * (game.intermission > 0 ? 0.25 : 1));
   R.render(game.time, { hurt: player.hurtFx, flash: player.flashFx, slow: scale < 1 ? 1 : 0, lowHp: player.alive && player.hp < 30 ? 1 - player.hp / 30 : 0 });
+  const showNames = online() && inMatch() && !game.menu && !hud.el.screen.classList.contains('show') && hud.el.board.hidden;
+  for (const r of remote.values()) r.updateNameTag(showNames, now / 1000);
 }
 requestAnimationFrame(tick);

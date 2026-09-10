@@ -1,15 +1,25 @@
-// Other people in the match. Each is drawn as a doodle figure in a team colour and eased between
+// Other people in the match. Each is drawn as a doodle figure in its own colour and eased between
 // the snapshots its owner sends; it also exposes the same surface enemies and weapons expect of a
 // target (body, center, eye, hit spheres, takeDamage) so the rest of the game does not care
 // whether it is shooting at a bot or a friend.
 import * as THREE from 'three';
-import { makeInkMaterial, setFill, INK } from './render.js';
+import { makeInkMaterial, setFill, setInk, INK, INK_COLORS } from './render.js';
 import { buildHumanoid, buildWeaponProp } from './enemies.js';
+import { SEE_THROUGH } from './physics.js';
 import { clamp, damp, angleLerp, wrapAngle } from './util.js';
 
 const _v = new THREE.Vector3(), _v2 = new THREE.Vector3(), _up = new THREE.Vector3(0, 1, 0);
-const WEAPON_KINDS = ['rifle', 'shotgun', 'sniper', 'blade'];
+const _tagHead = new THREE.Vector3(), _tagScreen = new THREE.Vector3(), _tagEye = new THREE.Vector3();
+const WEAPON_KINDS = ['rifle', 'shotgun', 'sniper', 'blade', 'rocket', 'grenade'];
 const HIT = [['head', 0.3], ['torso', 0.33], ['hips', 0.2], ['armL', 0.11], ['armR', 0.11], ['foreL', 0.1], ['foreR', 0.1], ['legL', 0.13], ['legR', 0.13], ['shinL', 0.11], ['shinR', 0.11]];
+
+// A room has ten seats. The host deals these slots once; names, score order and the viewer's
+// identity never choose a colour. HUD swatches use the renderer's palette so they match the figure.
+export const PLAYER_INKS = [INK.BLUE, INK.GREEN, INK.ORANGE, INK.PINK, INK.TEAL, INK.VIOLET, INK.BROWN, INK.RED, INK.BLACK, INK.OLIVE];
+export const validPlayerColor = (slot) => Number.isInteger(slot) && slot >= 0 && slot < PLAYER_INKS.length;
+export const playerInk = (slot) => PLAYER_INKS[validPlayerColor(slot) ? slot : 0];
+const PLAYER_CSS = PLAYER_INKS.map((ink) => '#' + INK_COLORS[ink].toArray().map((v) => Math.round(v * 255).toString(16).padStart(2, '0')).join(''));
+export const playerColorCSS = (slot) => PLAYER_CSS[validPlayerColor(slot) ? slot : 0];
 
 // what a player broadcasts about itself, ~20 times a second:
 // position, look, weapon, state flags, hp, velocity and (while grappling) where the hook is
@@ -31,6 +41,11 @@ export class RemotePlayer {
     this.yaw = 0; this.pitch = 0; this.crouching = false; this.sliding = false; this.blocking = false; this.aiming = false; this.firing = false;
     this.snapA = null; this.snapB = null; this.phase = 0; this.walk = 0; this.flashT = 0; this.deadT = 0; this.kills = 0; this.deaths = 0; this.score = 0;
     this.mat = makeInkMaterial({ ink, shadeScale: 0, shadeBias: 1 }); this.solid = makeInkMaterial({ ink: INK.BLACK, fill: true, side: THREE.DoubleSide });
+    this.tagMat = makeInkMaterial({ ink, fill: true, side: THREE.DoubleSide });
+    this.nameTag = document.createElement('div'); this.nameTag.className = 'player-nametag'; this.nameTag.hidden = true;
+    this.nameTag.dir = 'auto'; this.nameTag.textContent = this.name;
+    this.nameTag.style.setProperty('--player-color', playerColorCSS(PLAYER_INKS.indexOf(ink)));
+    ctx.hud.root.prepend(this.nameTag); this._nameSightAt = 0; this._nameInSight = false;
     this.T = { weapon: 'rifle', scale: 1.0, hat: 'cap', build: { bodyW: 1, headS: 1, limbR: 0.033 }, blockRadius: 0 };
     this.hit = HIT; this.hitSpheres = HIT.map(() => new THREE.Vector3()); this.vel = new THREE.Vector3(); this.grappling = false; this.gPoint = new THREE.Vector3();
     this._buildModel();
@@ -42,15 +57,35 @@ export class RemotePlayer {
     const model = buildHumanoid(this.mat, this.solid, this.T);
     this.root = model.root; this.parts = model.parts; this.J = model.J; this.face = model.face;
     this.root.visible = false; this.ctx.scene.add(this.root); this.weaponIndex = -1;
-    // a name tag: a little flag above the head so you know who is who
+    // The world-space flag shares its ink with the screen-space username.
     this.tagG = new THREE.Group(); this.root.add(this.tagG); this.tagG.position.y = 2.25;
-    const flag = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.28, 0.02), makeInkMaterial({ ink: this.ink, fill: true, side: THREE.DoubleSide })); this.tagG.add(flag);
+    const flag = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.28, 0.02), this.tagMat); this.tagG.add(flag);
     this.corpse = false;
+  }
+  setInk(ink) { this.ink = ink; setInk(this.mat, ink); setInk(this.tagMat, ink); this.nameTag.style.setProperty('--player-color', playerColorCSS(PLAYER_INKS.indexOf(ink))); }
+  updateNameTag(show, now = performance.now() / 1000) {
+    const tag = this.nameTag, camera = this.ctx.camera;
+    if (!show || !this.root || !this.root.visible || !this.alive || this.corpse || this.away) { tag.hidden = true; this._nameSightAt = 0; return; }
+    _tagHead.setFromMatrixPosition(this.parts.head.matrixWorld);
+    _tagEye.setFromMatrixPosition(camera.matrixWorld);
+    const distance = _tagEye.distanceTo(_tagHead);
+    _tagScreen.copy(_tagHead); _tagScreen.y += 0.65; _tagScreen.project(camera);
+    if (distance > 120 || _tagScreen.z < -1 || _tagScreen.z > 1 || Math.abs(_tagScreen.x) > 1 || Math.abs(_tagScreen.y) > 1) { tag.hidden = true; this._nameSightAt = 0; return; }
+    // Test the actual head, not the floating label: a name above a wall must not reveal its owner.
+    // Ten checks a second per visible player keeps the map's collider scan out of every frame.
+    if (now >= this._nameSightAt) { this._nameInSight = this.ctx.world.hasLineOfSight(_tagEye, _tagHead, SEE_THROUGH); this._nameSightAt = now + 0.1; }
+    tag.hidden = !this._nameInSight;
+    if (tag.hidden) return;
+    if (tag.textContent !== this.name) tag.textContent = this.name;
+    const x = (_tagScreen.x * 0.5 + 0.5) * window.innerWidth, y = (0.5 - _tagScreen.y * 0.5) * window.innerHeight;
+    tag.style.transform = `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0) translate(-50%, -100%)`;
+    tag.style.opacity = Math.max(0.45, 1 - Math.max(0, distance - 30) / 160).toFixed(2);
   }
   // knocked flat with some physics: the whole figure tumbles away as debris (bits come off on a
   // big hit), and a fresh figure is drawn when the player comes back
   ragdoll(dir, over) {
     if (this.corpse) return; this.corpse = true; const eff = this.ctx.effects, scene = this.ctx.scene, J = this.J;
+    this.nameTag.hidden = true; this._nameSightAt = 0;
     this.tagG.visible = false; this.rope.visible = false; this.hook.visible = false;
     const d = (dir && dir.lengthSq() > 0.01 ? dir.clone() : new THREE.Vector3(0, 0.4, -1)).normalize();
     const detach = (obj, extraVel, radius) => { if (!obj || !obj.parent) return; obj.updateWorldMatrix(true, false); scene.attach(obj); _v.copy(d).multiplyScalar(4 + Math.random() * 4).add(extraVel); _v.y += 2 + Math.random() * 3; eff.debris(obj, obj.position, _v, new THREE.Vector3((Math.random() - 0.5) * 16, (Math.random() - 0.5) * 16, (Math.random() - 0.5) * 16), { radius, blood: true, life: 7 + Math.random() * 3 }); };
@@ -69,7 +104,15 @@ export class RemotePlayer {
   setWeapon(i) {
     if (i === this.weaponIndex && this.J.gun.children.length) return; this.weaponIndex = i;
     const gun = this.J.gun; while (gun.children.length) gun.remove(gun.children[0]);
-    buildWeaponProp(gun, this.mat, this.solid, { weapon: WEAPON_KINDS[i] || 'rifle' });
+    const kind = WEAPON_KINDS[i] || 'rifle';
+    if (kind === 'grenade') {
+      const body = new THREE.Mesh(new THREE.SphereGeometry(0.14, 8, 6), this.mat); body.position.set(0, 0.03, 0.08); gun.add(body);
+      const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.09, 6), this.solid); cap.position.set(0, 0.17, 0.08); gun.add(cap);
+      const pin = new THREE.Mesh(new THREE.TorusGeometry(0.055, 0.016, 4, 8), this.solid); pin.position.set(0, 0.24, 0.08); gun.add(pin);
+    } else if (kind === 'rocket') {
+      const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 1.2, 8), this.mat); tube.rotation.x = Math.PI / 2; tube.position.set(0, 0.05, 0.25); gun.add(tube);
+      const rim = new THREE.Mesh(new THREE.TorusGeometry(0.1, 0.025, 5, 8), this.solid); rim.position.set(0, 0.05, 0.86); gun.add(rim);
+    } else buildWeaponProp(gun, this.mat, this.solid, { weapon: kind });
   }
   push(snap, t) {
     if (!snap) return;
@@ -81,7 +124,7 @@ export class RemotePlayer {
     if (snap.length > 10) this.vel.set(snap[8], snap[9], snap[10]); else this.vel.set(0, 0, 0);
     this.grappling = !!(f & 128) && snap.length > 13; if (this.grappling) this.gPoint.set(snap[11], snap[12], snap[13]); this.parryWindow = !!(f & 256); const idle = !!(f & 512); if (idle && !this.idle) this.idleSince = t; this.idle = idle; this.untouched = !!(f & 1024); this.away = !!(f & 2048);
     if (wasAlive && !this.alive) this.deadT = 0;
-    if (this.alive && this.corpse) { this._buildModel(); this.snapA = null; this.body.pos.copy(this.snapB.p); }
+    if (this.alive && this.corpse) { this._buildModel(); this.setWeapon(snap[5]); this.snapA = null; this.body.pos.copy(this.snapB.p); }
     if (this.root && !this.root.visible && !this.away) { this.body.pos.copy(this.snapB.p); this.root.visible = true; }
     if (this.root && this.away) this.root.visible = false;
   }
@@ -115,6 +158,7 @@ export class RemotePlayer {
     this.root.position.copy(this.body.pos); this.root.rotation.y = this.yaw + Math.PI;
     this._animate(dt);
     this.root.updateMatrixWorld(true);
+    _v.setFromMatrixPosition(this.parts.head.matrixWorld); this.root.worldToLocal(_v); this.tagG.position.copy(_v); this.tagG.position.y += 0.45;
     for (let i = 0; i < HIT.length; i++) this.hitSpheres[i].setFromMatrixPosition(this.parts[HIT[i][0]].matrixWorld);
     this._updateRope();
   }
@@ -139,11 +183,14 @@ export class RemotePlayer {
     if (!b.onGround) { J.legL.rotation.x = -0.5; J.legR.rotation.x = 0.6; J.shinL.rotation.x = 1.0; J.shinR.rotation.x = 0.5; }
     // guns are carried up and forward, two hands on them, tilting with where they look; the
     // blade hangs at the side until it is raised to guard
-    const blade = this.weaponIndex === WEAPON_KINDS.length - 1; const aim = blade ? 0 : (this.aiming ? 1 : sp > 6.5 ? 0.8 : 0.95);
+    const kind = WEAPON_KINDS[this.weaponIndex], blade = kind === 'blade', grenade = kind === 'grenade'; const aim = blade || grenade ? 0 : (this.aiming ? 1 : sp > 6.5 ? 0.8 : 0.95);
     const look = clamp(this.pitch, -1.1, 1.1);
     if (blade) {
       const g = this.blocking ? 1 : 0;
       J.armR.rotation.x = -0.9 - g * 0.9 - s * 0.6 * w * (1 - g); J.armR.rotation.z = -0.3 - g * 0.5; J.foreR.rotation.x = -1.0 - g * 0.6; J.armL.rotation.x = s * 0.8 * w * (1 - g) - g * 1.4; J.foreL.rotation.x = -0.5;
+    } else if (grenade) {
+      J.armR.rotation.x = -0.8 - s * 0.3 * w; J.armR.rotation.z = -0.2; J.foreR.rotation.x = -0.7;
+      J.armL.rotation.x = s * 0.8 * w; J.armL.rotation.y = 0; J.foreL.rotation.x = -0.3;
     } else {
       J.armR.rotation.x = (-1.35 - look * 0.85) * aim - s * 0.6 * w * (1 - aim); J.armR.rotation.z = -0.2 * (1 - aim); J.foreR.rotation.x = -0.2;
       J.armL.rotation.x = (-1.25 - look * 0.85) * aim + s * 0.6 * w * (1 - aim); J.armL.rotation.y = 0.55 * aim; J.foreL.rotation.x = -0.45;
@@ -153,5 +200,5 @@ export class RemotePlayer {
     J.headG.rotation.x = clamp(-this.pitch, -0.7, 0.7) * 0.7;
     this.tagG.rotation.y = -this.root.rotation.y + (this.ctx.player ? Math.atan2(this.ctx.player.eye.x - this.body.pos.x, this.ctx.player.eye.z - this.body.pos.z) : 0);
   }
-  dispose() { if (this.root) this.ctx.scene.remove(this.root); this.ctx.scene.remove(this.rope); this.ctx.scene.remove(this.hook); }
+  dispose() { this.nameTag.remove(); if (this.root) this.ctx.scene.remove(this.root); this.ctx.scene.remove(this.rope); this.ctx.scene.remove(this.hook); }
 }
