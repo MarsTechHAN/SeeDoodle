@@ -989,10 +989,12 @@ function onMessage(client, raw) {
       if (m.tt === 'start' && !m.to && !(m.d && m.d.late)) {
         clearCombat(room);
         if (netsim && room.mode === 'battlefield') {
-          netsim.startAuth(room);
-          if (!room._authT) room._authT = setInterval(() => {
-            try { netsim.tickRoom(room, { noteMove, sendBin }); } catch (e) { console.error('auth tick:', e.message); }
-          }, 1000 / 30);
+          try {
+            netsim.startAuth(room);
+            if (!room._authT) room._authT = setInterval(() => {
+              try { netsim.tickRoom(room, { noteMove, sendBin }); } catch (e) { console.error('auth tick:', e.message); }
+            }, 1000 / 30);
+          } catch (e) { console.error('auth start:', e.message); }
         }
       }
       if (m.tt === 'combatstate') {

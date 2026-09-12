@@ -205,25 +205,33 @@ export class Net {
     if (!this.url) this.url = serverURL();
     this._close();
     this._opening = (async () => {
+      // WebSocket first. This page is often behind an nginx TLS terminator that cannot
+      // speak WebTransport; trying WT first either waits 1.5s or, worse, "connects" to
+      // an HTTP/3 edge that is not the room and then looks like a lost server.
+      let wsErr;
+      try {
+        await new Promise((resolve, reject) => {
+          let sock;
+          try { sock = new WebSocket(this.url); } catch (e) { reject(new Error('the server is not reachable')); return; }
+          const timer = setTimeout(() => { try { sock.close(); } catch (e) { /* ignore */ } reject(new Error('the server did not answer')); }, OPEN_TIMEOUT);
+          sock.onopen = () => {
+            clearTimeout(timer);
+            this._live(sock, 'websocket');
+            resolve();
+          };
+          sock.onerror = () => { clearTimeout(timer); reject(new Error('could not reach the server')); };
+          sock.onclose = () => { clearTimeout(timer); reject(new Error('could not reach the server')); };
+        });
+        return;
+      } catch (e) { wsErr = e; }
       try {
         const wt = await this._openWebTransport();
         if (wt) {
           this._live(wt, wt.path);
           return;
         }
-      } catch (e) { /* fall through to WebSocket */ }
-      await new Promise((resolve, reject) => {
-        let sock;
-        try { sock = new WebSocket(this.url); } catch (e) { reject(new Error('the server is not reachable')); return; }
-        const timer = setTimeout(() => { try { sock.close(); } catch (e) { /* ignore */ } reject(new Error('the server did not answer')); }, OPEN_TIMEOUT);
-        sock.onopen = () => {
-          clearTimeout(timer);
-          this._live(sock, 'websocket');
-          resolve();
-        };
-        sock.onerror = () => { clearTimeout(timer); reject(new Error('could not reach the server')); };
-        sock.onclose = () => { clearTimeout(timer); reject(new Error('could not reach the server')); };
-      });
+      } catch (e) { /* WS error is the one the player can act on */ }
+      throw wsErr || new Error('could not reach the server');
     })().finally(() => { this._opening = null; });
     return this._opening;
   }

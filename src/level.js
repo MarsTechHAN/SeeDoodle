@@ -2948,9 +2948,11 @@ function buildDinghao(B) {
     }
     const z1 = z0 + steps * run;
     L.conveyors.push({ min: { x: x - width / 2, y: -0.05, z: z0 - 0.2 }, max: { x: x + width / 2, y: 4.6, z: z1 + 0.2 }, vx: 0, vz: up ? 1.4 : -1.4 });
-    const strip = new THREE.Mesh(new THREE.BoxGeometry(width - 0.2, 0.03, 0.55), makeInkMaterial({ ink: INK.ORANGE, surface: 'metal' }));
-    scene.add(strip); L.meshes.push(strip);
-    L.animated.push({ mesh: strip, update: (t) => { const u = ((t * 0.55) % 1 + 1) % 1; const along = up ? u : 1 - u; strip.position.set(x, 0.08 + along * 4.12, z0 + along * (z1 - z0)); } });
+    if (scene) {
+      const strip = new THREE.Mesh(new THREE.BoxGeometry(width - 0.2, 0.03, 0.55), makeInkMaterial({ ink: INK.ORANGE, surface: 'metal' }));
+      scene.add(strip); L.meshes.push(strip);
+      L.animated.push({ mesh: strip, update: (t) => { const u = ((t * 0.55) % 1 + 1) % 1; const along = up ? u : 1 - u; strip.position.set(x, 0.08 + along * 4.12, z0 + along * (z1 - z0)); } });
+    }
   };
   escalator(-13.1, 0.4, true);
   escalator(-10.6, 0.4, false);
