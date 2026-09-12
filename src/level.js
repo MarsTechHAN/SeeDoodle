@@ -3545,6 +3545,88 @@ function buildDinghao(B) {
   return B.finish();
 }
 
+function addTankEgg(L, scene, world) {
+  // These service props sit beside ordinary map furniture. Authored pairs keep the reward on
+  // a reachable route; the short clearance search only accommodates nearby cover changes.
+  const spots = {
+    district: { kind: 'crate', pairs: [[[-17.8, 0, 34], [-19, 0, 29.5]], [[-43.8, 0, -16], [-40, 0, -14]]] },
+    undercity: { kind: 'barrel', pairs: [[[-17.8, .15, -40.2], [-22, .15, -41.7]], [[17.8, .15, 40.2], [22, .15, 41.7]]] },
+    depot: { kind: 'crate', pairs: [[[-10.4, 0, -27.8], [-13, 0, -25.3]], [[10.4, 0, 27.8], [13, 0, 25.3]]] },
+    zijingang: { kind: 'bin', pairs: [[[88, 0, -4], [94, 0, 0]], [[15.8, 0, 51], [10, 0, 55]]] },
+    timesquare: { kind: 'bin', pairs: [[[-23.7, 0, 12.8], [-18.5, 0, 9]], [[23.7, 0, -13.5], [18, 0, -16]]] },
+    summerpalace: { kind: 'pot', pairs: [[[-34.8, 0, 29.8], [-39, 0, 33.5]], [[-63.4, 0, 31], [-60, 0, 35]]] },
+    yuanmingyuan: { kind: 'pot', pairs: [[[-44.5, 0, 43.5], [-40, 0, 46.5]], [[44.5, 0, -39], [40, 0, -43]]] },
+    greatwall: { kind: 'crate', pairs: [[[-52.8, 20, -8.2], [-48, 20, -11]], [[52.8, 34, -6.2], [48, 34, -9]]] },
+    lombard: { kind: 'bin', pairs: [[[-18, 0, 79], [-13, 0, 77]], [[18, 34, -79], [15, 34, -75]]] },
+    mexico: { kind: 'pot', pairs: [[[-31.8, 0, 21.4], [-28, 0, 18.5]], [[31.8, 0, -15], [28, 0, -18]]] },
+  };
+  const config = spots[L.key]; if (!config) return L;
+  const h = { bin: .94, barrel: .86, crate: .78, pot: .65 }[config.kind];
+  const q = [], min = new THREE.Vector3(), max = new THREE.Vector3(), bounds = L.bounds;
+  const fit = (seed, halfW, height) => {
+    const [x, y, z] = seed;
+    if (x - halfW < bounds.minX + .5 || x + halfW > bounds.maxX - .5 || z - halfW < bounds.minZ + .5 || z + halfW > bounds.maxZ - .5) return null;
+    min.set(x - halfW, y - 1, z - halfW); max.set(x + halfW, y + height + .6, z + halfW); world.query(min, max, q);
+    let low = Infinity, floor = -Infinity;
+    for (const dx of [-halfW, 0, halfW]) for (const dz of [-halfW, 0, halfW]) {
+      let top = -Infinity;
+      for (const b of q) if (!b.data.noNav && b.max.y <= y + .55 && b.min.x <= x + dx && b.max.x >= x + dx && b.min.z <= z + dz && b.max.z >= z + dz) top = Math.max(top, b.max.y);
+      if (!Number.isFinite(top) || top < y - .85) return null;
+      low = Math.min(low, top); floor = Math.max(floor, top);
+    }
+    if (floor - low > .32) return null;
+    min.set(x - halfW, floor + .04, z - halfW); max.set(x + halfW, floor + height, z + halfW);
+    return world.overlapsAABB(min, max) ? null : new THREE.Vector3(x, floor + .045, z);
+  };
+  const awayFromStartsAndSites = p => !(L.teamSpawns || []).flat().some(s => Math.abs(s.y - p.y) < 3 && Math.hypot(s.x - p.x, s.z - p.z) < 5)
+    && !(L.bombSites || []).some(s => Math.abs(s.pos.y - p.y) < 3 && Math.hypot(s.pos.x - p.x, s.pos.z - p.z) < s.radius + 3);
+  let placement = null;
+  for (const [eggSeed, tankSeed] of config.pairs) {
+    const egg = fit(eggSeed, .44, h + .12); if (!egg || !awayFromStartsAndSites(egg)) continue;
+    for (const [dx, dz] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1], [2, 0], [-2, 0], [0, 2], [0, -2]]) {
+      // Clearance covers the hull while turning, beyond its 1.5 m physics half-width.
+      const tank = fit([tankSeed[0] + dx, tankSeed[1], tankSeed[2] + dz], 2.15, 2.4);
+      if (!tank || !awayFromStartsAndSites(tank) || Math.hypot(tank.x - egg.x, tank.z - egg.z) < 3) continue;
+      const a = tank.clone().add(new THREE.Vector3(0, .7, 0)), b = egg.clone().add(new THREE.Vector3(0, .7, 0));
+      if (!world.hasLineOfSight(a, b)) continue;
+      placement = { egg, tank }; break;
+    }
+    if (placement) break;
+  }
+  // A future map edit must never turn the secret into a vehicle embedded in a wall.
+  if (!placement) { console.warn(`No clear tank egg location in ${L.key}`); return L; }
+  const group = new THREE.Group(), ink = config.kind === 'bin' || config.kind === 'barrel' ? INK.BLACK : INK.BROWN;
+  const part = (g, color = ink, surface = 'metal') => group.add(new THREE.Mesh(g, makeInkMaterial({ ink: color, surface })));
+  if (config.kind === 'bin') {
+    part(new THREE.CylinderGeometry(.33, .29, .77, 12).translate(0, .42, 0));
+    part(new THREE.CylinderGeometry(.36, .36, .075, 12).translate(0, .06, 0));
+    part(new THREE.CylinderGeometry(.37, .35, .13, 12).translate(0, .845, 0));
+    part(new THREE.BoxGeometry(.32, .065, .19).translate(0, .88, .285), INK.BROWN);
+    const ribs = [];
+    for (let i = 0; i < 10; i++) { const a = i * TAU / 10, g = new THREE.BoxGeometry(.025, .61, .025); g.translate(Math.sin(a) * .328, .43, Math.cos(a) * .328); ribs.push(g); }
+    part(mergeGeometries(ribs, false));
+  } else if (config.kind === 'crate') {
+    part(new THREE.BoxGeometry(.76, .72, .76).translate(0, .36, 0), ink, 'wood');
+    for (const y of [.14, .57]) part(new THREE.BoxGeometry(.8, .09, .8).translate(0, y, 0), INK.BLACK, 'wood');
+    part(new THREE.BoxGeometry(.09, .74, .79).translate(0, .38, 0), ink, 'wood');
+  } else if (config.kind === 'barrel') {
+    part(new THREE.CylinderGeometry(.33, .34, .8, 10).translate(0, .4, 0));
+    for (const y of [.12, .69]) part(new THREE.TorusGeometry(.345, .025, 4, 12).rotateX(Math.PI / 2).translate(0, y, 0), INK.BROWN);
+    part(new THREE.CylinderGeometry(.075, .075, .025, 8).translate(.14, .81, .08));
+  } else {
+    part(new THREE.CylinderGeometry(.32, .21, .53, 12).translate(0, .285, 0), ink, 'ceramic');
+    part(new THREE.TorusGeometry(.325, .042, 5, 12).rotateX(Math.PI / 2).translate(0, .56, 0), ink, 'ceramic');
+    part(new THREE.CylinderGeometry(.29, .29, .025, 12).translate(0, .545, 0), INK.BLACK, 'ground');
+  }
+  group.position.copy(placement.egg); scene.add(group); L.meshes.push(group);
+  const br = { id: L.breakables.length, kind: config.kind === 'bin' ? 'barrel' : config.kind, tankEgg: true, group, hp: 1, pos: placement.egg.clone().add(new THREE.Vector3(0, h / 2, 0)), alive: true, ink, box: null };
+  min.set(placement.egg.x - .42, placement.egg.y, placement.egg.z - .42); max.set(placement.egg.x + .42, placement.egg.y + h, placement.egg.z + .42);
+  br.box = world.addBox(min, max, { noNav: true, breakable: br }); L.breakables.push(br);
+  L.tankEgg = { id: br.id, spawn: placement.tank.toArray(), yaw: 0 };
+  world.finalize();
+  return L;
+}
+
 function populateMatchSpawns(L, world) {
   const q = [], min = new THREE.Vector3(), max = new THREE.Vector3(), bounds = L.bounds;
   const fit = (x, y, z) => {
@@ -3600,7 +3682,7 @@ function assemble(scene, world, key, opts) {
   const B = createBuilder(scene, world);
   const team = !!opts.team, arena = !!opts.arena || team;
   const level = key === 'dinghao' ? buildDinghao(B) : key === 'greatwall' ? buildGreatWall(B) : key === 'yuanmingyuan' ? buildYuanmingyuan(B) : key === 'summerpalace' ? buildSummerPalace(B) : key === 'lombard' ? buildLombard(B) : key === 'timesquare' ? buildTimesSquare(B) : key === 'zijingang' ? buildZijingang(B) : key === 'depot' ? buildDepot(B) : key === 'mexico' ? buildMexico(B, arena) : key === 'undercity' ? buildUndercity(B, arena, team) : buildDistrict(B, arena, team);
-  return populateMatchSpawns(level, world);
+  return addTankEgg(populateMatchSpawns(level, world), scene, world);
 }
 export function buildLevel(scene, world, key = 'district', opts = {}) {
   if (!scene) throw new Error('buildLevel needs a scene; use buildCollision for the server path');

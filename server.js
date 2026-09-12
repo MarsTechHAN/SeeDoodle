@@ -251,7 +251,7 @@ function makeRoom(code, host, { isPublic, name, map, max }) {
     code, codes: new Set([code]), hostId: host.id, isPublic: !!isPublic,
     members: new Map(), max: Number.isSafeInteger(max) ? Math.min(Math.max(2, max), HARD_MAX) : MAX_PLAYERS,
     inMatch: false, accepting: true, hostName: name || '', map: map || null,
-    mode: null, combat: null, actors: new Map(), bots: new Map(), lobbyBots: new Set(), evictedBots: new Set(), unshielded: new Map(),
+    mode: null, combat: null, actors: new Map(), bots: new Map(), lobbyBots: new Set(), evictedBots: new Set(), unshielded: new Map(), tank: null, tankShots: new Map(), tankShotSerial: 0, tankFireAt: 0,
   };
   rooms.set(code, room);
   return room;
@@ -415,7 +415,9 @@ const ARMS = {
   sniper: { max: 150 * 1.5, rate: 5, burst: 3, reach: 300, mv: 450 },
   revolver: { max: 52 * 2.9, rate: 1 / 0.3, burst: 3, reach: 300, mv: 260 },
   katana: { max: 165, base: 55, rate: 3, burst: 4, reach: 4.5 },
-  grenade: { max: 62, rate: 1.25, burst: 8, reach: 6.4 * 0.95 },
+  grenadeBash: { max: 55, rate: 3, burst: 4, reach: 4.5 },
+  grenade: { max: 93, rate: 1.25, burst: 8, reach: 9.6 * 0.95 },
+  tank: { max: 250, rate: 1 / 1.5, burst: 1, reach: 240, blastR: 2.88 * 0.95 },
 };
 const shots = { ok: 0, rejected: 0, why: {} };
 const deny = (r) => { shots.rejected++; shots.why[r] = (shots.why[r] || 0) + 1; return false; };
@@ -426,6 +428,7 @@ const teamMode = (room) => room.mode === 'tdm' || room.mode === 'demolition' || 
 const combatPhases = new Set(['warmup', 'live', 'roundover', 'over']);
 function clearCombat(room) {
   room.combat = null; room.actors.clear(); room.bots.clear(); room.unshielded.clear();
+  room.tank = null; room.tankShots.clear(); room.tankShotSerial = 0; room.tankFireAt = 0;
   for (const member of room.members.values()) { member.grenades.clear(); member.hist.length = 0; member.buckets = {}; }
   if (netsim) netsim.stopAuth(room);
 }
@@ -468,7 +471,9 @@ function noteCombat(room, d) {
     if (bot) bots.set(row.id, room.bots.get(row.id) || { id: row.id, room, bot: true, hist: [], rtt: [], buckets: {}, grenades: new Map() });
   }
   const fresh = !room.combat || d.mode !== room.mode || d.round !== room.combat.round;
-  if (fresh) room.unshielded.clear();
+  if (fresh) {
+    room.unshielded.clear(); room.tank = null; room.tankShots.clear(); room.tankShotSerial = 0; room.tankFireAt = 0;
+  }
   else for (const [id, life] of room.unshielded) if (!actors.has(id) || actors.get(id).life !== life) room.unshielded.delete(id);
   for (const actor of [...room.members.values(), ...bots.values()]) {
     const next = actors.get(actor.id), changedLife = next && room.actors.get(actor.id)?.life !== next.life;
@@ -642,14 +647,50 @@ function withinFireRate(client, kind, now) {
   b.n -= 1; return true;
 }
 
+function tankOccupant(room, id) {
+  const s = room.tank, actor = room.actors.get(id);
+  return !!(s?.spawned && s.hp > 0 && s.driver === id && room.members.has(id) && (!teamMode(room) || (s.round === room.combat?.round && actor?.alive && s.driverLife === actor.life)));
+}
+function noteTankState(room, d) {
+  if (!d || typeof d.epoch !== 'string' || !d.epoch.length || d.epoch.length > 80 || typeof d.map !== 'string' || !d.map.length || d.map.length > 64 || !Number.isSafeInteger(d.round) || d.round < 0 || !Number.isSafeInteger(d.rev) || d.rev < 0 || typeof d.spawned !== 'boolean' || !Number.isFinite(d.hp) || d.hp < 0 || d.hp > 88888 || !vec3(d.pos) || d.pos.length !== 3 || d.pos.some(n => Math.abs(n) > 10000) || ![d.yaw, d.turret, d.pitch, d.speed].every(Number.isFinite) || Math.abs(d.speed) > 16) return deny('malformed tank state');
+  if (d.driver !== null && (!room.members.has(d.driver) || d.hp <= 0 || !d.spawned)) return deny('invalid tank driver');
+  if (teamMode(room) && d.round !== room.combat?.round) return deny('stale tank round');
+  if (d.driver !== null && teamMode(room)) {
+    const actor = room.actors.get(d.driver);
+    if (!actor?.alive || !Number.isSafeInteger(d.driverLife) || d.driverLife !== actor.life) return deny('stale tank driver life');
+  }
+  if (room.tank?.epoch === d.epoch && d.rev < room.tank.rev) return deny('stale tank state');
+  if (room.tank?.epoch !== d.epoch) { room.tankShots.clear(); room.tankShotSerial = 0; room.tankFireAt = 0; }
+  room.tank = d;
+  return true;
+}
+function noteTankFire(room, d) {
+  const s = room.tank, now = Date.now(), o = vec3(d?.pos), dir = vec3(d?.dir);
+  if (!s || !d || d.epoch !== s.epoch || !tankOccupant(room, d.driver) || !Number.isSafeInteger(d.serial) || d.serial < 1 || !o || d.pos.length !== 3 || !dir || d.dir.length !== 3 || Math.abs(len3(dir) - 1) > .02 || len3(sub(o, s.pos)) > 6) return deny('invalid tank fire');
+  const actor = room.actors.get(d.driver);
+  if (teamMode(room) && (room.combat?.phase !== 'live' || d.round !== s.round || d.life !== actor?.life)) return deny('stale tank fire');
+  for (const [id, shot] of room.tankShots) if (now - shot.at > 4000) room.tankShots.delete(id);
+  // Pruning old hit envelopes must not let a delayed packet reuse a cannon shot. This cursor
+  // belongs to the vehicle epoch and survives both hijacks and host migration.
+  if (d.serial <= room.tankShotSerial || (room.tankFireAt && now - room.tankFireAt < 1350)) return deny('tank firing too fast');
+  room.tankShotSerial = d.serial; room.tankFireAt = now;
+  room.tankShots.set(d.serial, { ...d, pos: o, dir, at: now, victims: new Set() });
+  if (actor) { actor.protectedUntil = 0; room.unshielded.set(actor.id, actor.life); }
+  return true;
+}
+
 function resolveHit(client, m) {
   const room = client.room;
   if (!room) return deny('no room');
   const victim = room.members.get(m.to) || room.bots.get(m.to);
   if (!victim || victim === client) return deny('no such target');
+  if (tankOccupant(room, victim.id)) return deny('target protected by tank hull');
+  if (tankOccupant(room, client.id) && m.k !== 'tank' && m.k !== 'grenade') return deny('handheld weapon inside tank');
   const launched = m.k === 'grenade' && client.grenades.get(m.gid);
   const lingeringGrenade = launched?.phase === 'thrown' ? launched : null;
-  if (!combatGate(room, client, victim, m, lingeringGrenade)) return false;
+  const now = Date.now(), cannon = m.k === 'tank' ? room.tankShots.get(m.sid) : null;
+  if (m.k === 'tank' && (!cannon || cannon.epoch !== m.epoch || cannon.epoch !== room.tank?.epoch || cannon.driver !== client.id || now - cannon.at > 4000 || cannon.victims.has(victim.id))) return deny('unregistered tank shot');
+  if (!combatGate(room, client, victim, m, lingeringGrenade || cannon)) return false;
   const arm = ARMS[m.k];
   if (!arm) return deny('unknown weapon');
   const dmg = Number(m.dmg);
@@ -658,9 +699,29 @@ function resolveHit(client, m) {
     const charge = m.charge === undefined ? 0 : m.charge;
     if (!Number.isFinite(charge) || charge < 0 || charge > 1) return deny('invalid slash charge');
     damageCap = Math.round(arm.base * (1 + 2 * charge));
-  }
+  } else if (m.k === 'grenadeBash') {
+    // The grenade stays intact: a bash has neither a fuse nor a charged-knife multiplier.
+    if (m.charge !== undefined && m.charge !== 0) return deny('invalid grenade bash charge');
+    damageCap = arm.max;
+  } else if (cannon) damageCap = arm.max;
   if (!(dmg > 0) || dmg > damageCap) return deny('damage out of range');
-  const now = Date.now();
+  let cannonImpact = null;
+  if (cannon) {
+    // Older clients reported one direct hit without an impact; do not mix that with splash claims.
+    if (cannon.legacyHit || (cannon.impact && m.at === undefined)) return deny('mixed tank impact protocol');
+    const origin = vec3(m.o), dir = vec3(m.d);
+    if (!origin || !dir || len3(sub(origin, cannon.pos)) > .1 || len3(sub(dir, cannon.dir)) > .02) return deny('tank shot changed');
+    if (m.blast !== undefined && typeof m.blast !== 'boolean') return deny('invalid tank blast flag');
+    if (m.at !== undefined) {
+      const at = vec3(m.at), distance = Number(m.r);
+      if (!at || m.at.length !== 3 || !Number.isFinite(distance) || distance < 0) return deny('malformed tank impact');
+      const delta = sub(at, cannon.pos), size = len3(cannon.dir), unit = cannon.dir.map(n => n / size), along = dot3(delta, unit);
+      const offRay = sub(delta, unit.map(n => n * along));
+      if (along < -.2 || along > arm.reach + .2 || len3(offRay) > .2 || Math.abs(distance - along) > .2) return deny('tank impact outside shot');
+      if (cannon.impact && len3(sub(at, cannon.impact)) > .2) return deny('tank impact moved');
+      cannonImpact = cannon.impact || at;
+    } else if (m.blast) return deny('missing tank blast impact');
+  }
   const recordedGrenade = m.k === 'grenade' && m.gid != null;
   let grenade = null;
   if (recordedGrenade) {
@@ -669,7 +730,7 @@ function resolveHit(client, m) {
     if (!grenade) return deny('unknown grenade');
     if (now < grenade.expiresAt - Math.min(MAX_REWIND_MS, rttOf(client) + 100)) return deny('grenade has not exploded');
     if (grenade.victims.has(victim.id)) return deny('duplicate grenade hit');
-  } else if (!withinFireRate(client, m.k, now)) return deny('firing too fast');
+  } else if (!cannon && !withinFireRate(client, m.k, now)) return deny('firing too fast');
 
   // Wind the target back to the shooter's screen. Their own round trip sets how far, capped so a
   // player who lets their connection rot cannot reach ever further into the past.
@@ -681,6 +742,7 @@ function resolveHit(client, m) {
   if (!seen) return deny('target never reported a position');
   if (!seen.alive) return deny('target already down');
   const target = [seen.x, seen.y, seen.z];
+  if (cannonImpact && len3(sub(cannonImpact, [target[0], target[1] + .9, target[2]])) > arm.blastR + HULL_R) return deny('outside the tank blast');
   // How long the round was in the air: zero unless the room is playing with ballistics, and capped
   // at what the gun could plausibly take to cross its own range.
   const rawT = Number(m.ft);
@@ -690,7 +752,9 @@ function resolveHit(client, m) {
   // `now - tof` on this clock - and plain `now` for an instant shot, which is what it always was.
   const selfNow = whereAt(client, now - tof * 1000);
 
-  if (m.k === 'grenade') {
+  if (cannon && m.blast) {
+    // Splash shares the registered shell's single impact. Nearby victims need not lie on its ray.
+  } else if (m.k === 'grenade') {
     const at = vec3(m.at);
     if (!at) return deny('malformed claim');
     const c = [target[0], target[1] + 0.9, target[2]];
@@ -701,14 +765,14 @@ function resolveHit(client, m) {
       grenade.blast = at;
       grenade.victims.add(victim.id);
     } else if (selfNow && len3(sub(at, [selfNow.x, selfNow.y, selfNow.z])) > 45) return deny('blast nowhere near the thrower');
-  } else if (m.k === 'katana') {
+  } else if (m.k === 'katana' || m.k === 'grenadeBash') {
     if (!selfNow) return deny('shooter never reported a position');
     const gap = len3(sub([selfNow.x, selfNow.y + 0.9, selfNow.z], [target[0], target[1] + 0.9, target[2]]));
     if (gap > arm.reach) return deny('out of reach');
   } else {
     const o = vec3(m.o);
     if (!o) return deny('malformed claim');
-    if (selfNow && len3(sub(o, [selfNow.x, selfNow.y + 0.9, selfNow.z])) > ORIGIN_SLACK) return deny('shot did not start at the shooter');
+    if (!cannon && selfNow && len3(sub(o, [selfNow.x, selfNow.y + 0.9, selfNow.z])) > ORIGIN_SLACK) return deny('shot did not start at the shooter');
     const lo = [target[0], target[1] + HULL_LO, target[2]], hi = [target[0], target[1] + HULL_HI, target[2]];
     if (tof > 0) {
       // A round that fell on the way cannot be re-traced from here, so what gets checked is the
@@ -730,14 +794,15 @@ function resolveHit(client, m) {
   }
 
   shots.ok++;
-  const from = grenade ? vec3(m.at) : selfNow ? [+selfNow.x.toFixed(1), +(selfNow.y + 0.9).toFixed(1), +selfNow.z.toFixed(1)] : null;
+  if (cannon) { cannon.victims.add(victim.id); if (cannonImpact) cannon.impact = cannonImpact; else cannon.legacyHit = true; }
+  const from = grenade ? vec3(m.at) : cannon ? (m.blast ? cannonImpact : cannon.pos) : selfNow ? [+selfNow.x.toFixed(1), +(selfNow.y + 0.9).toFixed(1), +selfNow.z.toFixed(1)] : null;
   const d = { amount: Math.round(dmg), from, by: client.id, crit: !!m.crit, src: m.k, ...(teamMode(room) ? { round: room.combat.round, life: room.actors.get(victim.id).life } : {}) };
   if (victim.bot) send(room.members.get(room.hostId), { t: 'm', tt: 'bdmg', from: client.id, d: { ...d, id: victim.id } });
   else send(victim, { t: 'm', tt: 'pdmg', from: client.id, d });
   return true;
 }
 
-const HOST_MESSAGES = new Set(['lobby', 'start', 'combatstate', 'end', 'score', 'backtolobby', 'clock', 'botps', 'bothit', 'botnade', 'botdead', 'botshots']);
+const HOST_MESSAGES = new Set(['lobby', 'start', 'combatstate', 'end', 'score', 'backtolobby', 'clock', 'botps', 'bothit', 'botnade', 'botdead', 'botshots', 'tankstate', 'tankfire']);
 const WIRE_STALE = 'reload — the wire format changed';
 
 function onBinary(client, raw) {
@@ -898,6 +963,13 @@ function onMessage(client, raw) {
         break;
       }
       if (HOST_MESSAGES.has(m.tt) && client.id !== room.hostId) { deny('host message sent by guest'); break; }
+      if (m.tt === 'tankstate' && !noteTankState(room, m.d)) break;
+      if (m.tt === 'tankfire' && !noteTankFire(room, m.d)) break;
+      if (m.tt === 'tankreq') {
+        if (m.d?.op === 'sync' && room.tank) send(client, { t: 'm', tt: 'tankstate', from: room.hostId, d: room.tank });
+        if (client.id !== room.hostId) send(room.members.get(room.hostId), { t: 'm', tt: 'tankreq', from: client.id, d: m.d });
+        break;
+      }
       if (m.tt === 'bdmg') { deny('bdmg sent direct'); break; }
       if (m.tt === 'combatreq') { sendCombat(room, client); break; }
       if (m.tt === 'unshield') {

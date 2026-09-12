@@ -181,6 +181,7 @@ export class TeamMatch {
     }
   }
   actionFor(id) {
+    if (this.ctx.tanks?.occupied(id)) return null;
     const s = this.state, a = this.actor(id), b = this.body(id); if (!a?.alive || !b || s.mode !== 'demolition' || s.phase !== 'live') return null;
     const bomb = s.bomb; if (!bomb) return null;
     if (bomb.status === 'carried' && bomb.carrier === id) {
@@ -296,7 +297,7 @@ export class TeamMatch {
     this.spectate(dt); this.renderHUD();
   }
   updateObjectiveInput(mine, now) {
-    const inp = this.ctx.input, p = this.ctx.player, enabled = mine.alive && !this.ctx.game.menu && this.state.phase === 'live';
+    const inp = this.ctx.input, p = this.ctx.player, enabled = mine.alive && !this.ctx.tanks?.occupied(this.net.id) && !this.ctx.game.menu && this.state.phase === 'live';
     const flags = { moving: Math.abs(inp.move.x) + Math.abs(inp.move.y) > .1, attacking: !!(inp.down('fire') || inp.down('grenade') || inp.down('melee') || p._nadeHeld) };
     const send = (held, releasedAt = null) => {
       if (held && !this.objectiveHeld) this.objectiveHold++;
@@ -359,8 +360,8 @@ export class TeamMatch {
     b.viewHidden = true;
     if (b.root) b.root.visible = false;
     if (b.nameTag) b.nameTag.style.visibility = 'hidden';
-    const pose = this.spectatorPose, view = this.spectatorView;
-    if (!b.sampleView(performance.now() / 1000, pose)) { pose.eye.copy(b.eye); pose.yaw = b.yaw; pose.pitch = b.pitch; pose.epoch = b.viewEpoch; }
+    const pose = this.spectatorPose, view = this.spectatorView, inTank = !!this.ctx.tanks?.occupied(actor.id);
+    if (!b.sampleView(performance.now() / 1000, pose)) { pose.eye.copy(inTank ? b.body.pos : b.eye); if (inTank) pose.eye.y += 2.4; pose.yaw = b.yaw; pose.pitch = b.pitch; pose.epoch = `${b.viewEpoch}:${inTank ? 'tank' : 'foot'}`; }
     view.target.setFromEuler(view.euler.set(pose.pitch, pose.yaw, 0, 'YXZ'));
     if (view.epoch !== pose.epoch) { view.position.copy(pose.eye); view.rotation.copy(view.target); view.epoch = pose.epoch; }
     else {
@@ -370,14 +371,14 @@ export class TeamMatch {
     // The dead local player's update still writes the shared camera each frame. Ease from
     // our own previous pose, never from that corpse camera, including on low-FPS clients.
     this.ctx.camera.position.copy(view.position); this.ctx.camera.quaternion.copy(view.rotation); this.ctx.camera.updateMatrixWorld();
-    const hp = Math.max(0, Math.ceil(b.hp ?? actor.hp ?? 0));
-    this.spectatorPanel.textContent = ts('SPECTATING {} - {} HP', this.lobby.players.get(actor.id)?.name || b.name, hp) + ' · ' + ts(this.ctx.input.usingTouch ? 'Tap NEXT to switch teammates' : this.ctx.input.usingGamepad ? 'R2 switches teammates' : 'Left click switches teammates');
+    const hp = Math.max(0, Math.ceil(inTank ? this.ctx.tanks.state.hp : b.hp ?? actor.hp ?? 0));
+    this.spectatorPanel.textContent = ts(inTank ? 'SPECTATING {} - TANK {} HP' : 'SPECTATING {} - {} HP', this.lobby.players.get(actor.id)?.name || b.name, hp) + ' · ' + ts(this.ctx.input.usingTouch ? 'Tap NEXT to switch teammates' : this.ctx.input.usingGamepad ? 'R2 switches teammates' : 'Left click switches teammates');
   }
   restoreSpectator() {
     const hidden = this.hiddenSpectator;
     if (hidden) {
       hidden.body.viewHidden = false;
-      if (hidden.body.root) hidden.body.root.visible = !hidden.body.away && (!!hidden.visible || !!hidden.body.snapB);
+      if (hidden.body.root) hidden.body.root.visible = !hidden.body.away && !hidden.body.vehicleHidden && !this.ctx.tanks?.occupied(hidden.body.id) && (!!hidden.visible || !!hidden.body.snapB);
       if (hidden.body.nameTag) hidden.body.nameTag.style.visibility = hidden.tagVisibility;
     }
     this.hiddenSpectator = null; this.spectatedId = null;

@@ -26,6 +26,7 @@ const BTNS = [
   ['reload', 'RELOAD', 'b-reload'], ['jump', 'JUMP', 'b-jump'], ['aim', 'AIM', 'b-aim'],
   ['nadeCancel', 'CANCEL', 'b-nade-cancel gone'],
   ['interact', 'INTERACT', 'b-interact gone'], ['bombDrop', 'DROP C4', 'b-bomb-drop gone'],
+  ['vehicle', 'TANK', 'b-vehicle gone'],
   ['fire', 'FIRE', 'b-fire'],
 ];
 
@@ -50,6 +51,7 @@ export class TouchControls {
       this._faces.forEach((el, i) => { el.textContent = ts(BTNS[i][1]); });
       const mode = this._weaponMode || 'normal'; this._weaponMode = null; this.setWeaponMode(mode);
       this._grenadeKey = null; this.setGrenadeState(this._grenadeState);
+      this.setVehicle(this._vehicleState);
       const m = this.rotEl && this.rotEl.querySelector('.rotmsg'); if (m) m.textContent = ts('turn your phone sideways');
     });
     // A passive portrait hint; CSS hides it while a menu or the tactical map is open.
@@ -72,7 +74,7 @@ export class TouchControls {
   setActive(on) {
     if (on === this.active) return;
     this.active = on;
-    if (!on) { for (const a of Object.keys(this.frames)) this.input.markTouchHold(a, false); this.ptrs.clear(); this.stick = null; this.frames = {}; this.aimOn = false; this._syncBtns(); this._syncStick(); }
+    if (!on) { for (const a of Object.keys(this.frames)) this.input.markTouchHold(a, false); this.ptrs.clear(); this.stick = null; this.frames = {}; this.input.touchKeys = {}; this.aimOn = false; this._syncBtns(); this._syncStick(); this.setVehicle(null); }
   }
 
   _btnAt(e) { return e.target && e.target.closest ? e.target.closest('.tb') : null; }
@@ -84,7 +86,8 @@ export class TouchControls {
     if (btn) {
       e.preventDefault();
       const a = btn.dataset.a;
-      if (a === 'aim') { this.aimOn = !this.aimOn; btn.classList.toggle('on', this.aimOn); this.ptrs.set(e.pointerId, { kind: 'tap' }); return; }
+      if (btn.classList.contains('gone') || (this._driving && !['fire', 'jump', 'vehicle', 'score', 'pause'].includes(a))) return;
+      if (a === 'aim' && this._weaponMode !== 'grenades') { this.aimOn = !this.aimOn; btn.classList.toggle('on', this.aimOn); this.ptrs.set(e.pointerId, { kind: 'tap', a }); return; }
       this._press(a); btn.classList.add('on');
       // the fire button doubles as a look pad: one thumb has to be able to shoot and track at once
       this.ptrs.set(e.pointerId, { kind: 'btn', a, btn, x: e.clientX, y: e.clientY, look: a === 'fire' });
@@ -126,7 +129,7 @@ export class TouchControls {
     const p = this.ptrs.get(e.pointerId); if (!p) return;
     // Losing a touch is an interruption, not an intentional throw. The same cancel action safely
     // stows a safe grenade or drops a live one, without leaving a held input behind.
-    if ((e.type === 'pointercancel' && this._weaponMode === 'grenades' && (p.a === 'fire' || p.a === 'grenade')) ||
+    if ((e.type === 'pointercancel' && !this._driving && this._weaponMode === 'grenades' && (p.a === 'fire' || p.a === 'grenade')) ||
         (e.type === 'pointerup' && this._overGrenadeCancel(e, p))) {
       this._press('nadeCancel'); this._release('nadeCancel');
     }
@@ -139,8 +142,13 @@ export class TouchControls {
 
   _press(a) { const f = (this.frames[a] ||= { down: 0, n: 0 }); f.down++; f.n = 0; this.input.markTouchHold(a, true); }
   _release(a) { const f = this.frames[a]; if (f) { f.down = Math.max(0, f.down - 1); this.input.markTouchHold(a, f.down > 0); } }
+  _clearAction(a) {
+    delete this.frames[a]; delete this.input.touchKeys[a]; this.input.markTouchHold(a, false);
+    for (const [id, pointer] of this.ptrs) if (pointer.a === a) this.ptrs.delete(id);
+    for (const el of this.btnEls[a] || []) el.classList.remove('on', 'drop-target');
+  }
   _overGrenadeCancel(e, pointer) {
-    if (pointer.a !== 'fire' || this._weaponMode !== 'grenades' || !['safe', 'armed'].includes(this._grenadeState?.state)) return false;
+    if (this._driving || pointer.a !== 'fire' || this._weaponMode !== 'grenades' || !['safe', 'armed'].includes(this._grenadeState?.state)) return false;
     const el = this.btnEls.nadeCancel?.[0]; if (!el || !el.getClientRects().length) return false;
     const r = el.getBoundingClientRect();
     return r.width > 0 && r.height > 0 && Math.hypot((e.clientX - r.x - r.width / 2) / (r.width / 2), (e.clientY - r.y - r.height / 2) / (r.height / 2)) <= 1;
@@ -159,7 +167,7 @@ export class TouchControls {
   }
   _syncBtns() { for (const a in this.btnEls) for (const el of this.btnEls[a]) el.classList.remove('on', 'drop-target'); }
   _syncFireFace() {
-    const face = ts(this._weaponMode === 'grenades' ? 'THROW' : this._weaponMode === 'knives' || this._katanaActive ? 'CHARGE' : 'FIRE');
+    const face = ts(this._driving ? 'FIRE' : this._weaponMode === 'grenades' ? 'THROW' : this._weaponMode === 'knives' || this._katanaActive ? 'CHARGE' : 'FIRE');
     for (const el of this.btnEls.fire || []) if (el.textContent !== face) el.textContent = face;
   }
 
@@ -180,13 +188,14 @@ export class TouchControls {
   }
 
   setWeaponMode(mode) {
-    if (mode === this._weaponMode) return; this._weaponMode = mode; this.clearAim();
+    if (mode === this._weaponMode) return; this._weaponMode = mode; this.clearAim(); this._clearAction('aim');
     const grenades = mode === 'grenades', knives = mode === 'knives';
     for (const action of ['grenade', 'melee', 'reload', 'aim']) {
-      const hidden = action === 'grenade' ? false : action === 'melee' || action === 'aim' ? grenades : grenades || knives;
+      const hidden = action === 'grenade' || action === 'aim' ? false : action === 'melee' ? grenades : grenades || knives;
       for (const el of this.btnEls[action] || []) el.classList.toggle('gone', hidden);
       if (hidden) { delete this.frames[action]; this.input.markTouchHold(action, false); }
     }
+    for (const el of this.btnEls.aim || []) el.textContent = ts(grenades ? 'BASH' : 'AIM');
     this._syncFireFace();
     this._grenadeKey = null; this.setGrenadeState(this._grenadeState);
   }
@@ -213,8 +222,29 @@ export class TouchControls {
     if (!carrying) { delete this.frames.bombDrop; this.input.markTouchHold('bombDrop', false); }
   }
 
+  setVehicle(status) {
+    this._vehicleState = status;
+    const driving = !!status?.driving;
+    const action = status && Object.hasOwn(status, 'action') ? status.action : driving ? 'exit' : status?.canPull ? 'hijack' : status?.canEnter ? 'enter' : null;
+    const available = status?.visible !== false && !!action && !this.root.classList.contains('board-open') && !this.root.classList.contains('nogame');
+    if (driving !== !!this._driving) {
+      // A held trigger must not turn an entry/exit into a cannon shot or a charged weapon release.
+      for (const a of Object.keys(this.btnEls)) if (!['score', 'pause'].includes(a)) this._clearAction(a);
+      this.clearAim(); this._driving = driving; this.wrap.classList.toggle('driving', driving); this._syncFireFace();
+    }
+    if (!available || action !== this._vehicleAction) this._clearAction('vehicle');
+    this._vehicleAction = action;
+    for (const el of this.btnEls.vehicle || []) {
+      el.classList.toggle('gone', !available);
+      el.textContent = ts(action === 'hijack' ? 'PULL OUT' : action === 'exit' ? 'EXIT TANK' : 'ENTER TANK');
+      el.title = ts(action === 'hijack' ? 'hold to pull the driver out' : action === 'exit' ? 'leave the tank' : 'drive the tank');
+    }
+    for (const el of this.btnEls.jump || []) el.textContent = ts(driving ? 'BRAKE' : 'JUMP');
+  }
+
   // called once per frame, before Input.update folds everything together
   update() {
+    if (this.root.classList.contains('board-open')) this._clearAction('vehicle');
     const k = {};
     for (const a in this.frames) {
       const f = this.frames[a];
@@ -244,6 +274,7 @@ export const TOUCH_CONTROLS_HTML = `
     <div><b>KATANA</b> full charge in 0.8 seconds = 3x damage</div>
     <div><b>AIM</b> is a toggle: tap once to sight in, again to come out</div>
     <div><b>THROW</b> in grenades only: hold and drag to aim, release to throw</div>
+    <div><b>BASH</b> in grenades only: tap to strike; keeps throw charge and the live fuse</div>
     <div><b>PULL PIN</b> starts the 7-second fuse and locks the current throw power</div>
     <div><b>Full charge</b> stays safe by default; automatic pin pull is optional in settings</div>
     <div><b>CANCEL</b> stows a safe grenade; after pulling the pin, DROP leaves it at your feet</div>
@@ -257,6 +288,8 @@ export const TOUCH_CONTROLS_HTML = `
     <div><b>AIM + FIRE</b> dash-slash once the katana gauge is lit</div>
     <div><b>1-4</b> along the bottom pick a weapon</div>
     <div><b>MAP</b> tap to open map and scores; tap again or fire to close</div>
+    <div><b>TANK</b> tap to enter or exit; hold PULL OUT beside a stopped tank</div>
+    <div><b>BRAKE</b> hold to stop the tank; FIRE shoots the cannon</div>
   </div>
 </div>`;
 
@@ -264,5 +297,5 @@ export const TOUCH_KEYS = {
   fire: 'FIRE', aim: 'AIM', block: 'AIM', jump: 'JUMP', sprint: 'push the stick forward', slide: 'SLIDE', dash: 'SLIDE',
   grapple: 'HOOK', melee: 'SLASH', reload: 'RELOAD', grenade: 'NADE', focus: 'AIM + FIRE', next: 'the weapon numbers',
   pause: '❚❚', confirm: 'tap the screen', score: 'MAP',
-  nadePin: 'PULL PIN', nadeCancel: 'CANCEL', interact: 'INTERACT', bombDrop: 'DROP C4',
+  nadePin: 'PULL PIN', nadeCancel: 'CANCEL', interact: 'INTERACT', bombDrop: 'DROP C4', vehicle: 'TANK',
 };

@@ -14,6 +14,7 @@ import { step, STEP_DT } from './move.js';
 
 const G = 26, WALK = 6.6, SPRINT = 10.6, CROUCH = 3.6, ACCEL = 140, FRICTION = 8, AIR_ACCEL = 36, AIR_CAP = 7.5, JUMP = 9.6;
 const STAND_H = 1.75, CROUCH_H = 1.05, EYE_STAND = 1.6, EYE_CROUCH = 0.88;
+const GRENADE_BLAST = Object.freeze({ R: 9.6, enemyDmg: 180, selfBase: 15, selfMax: 51, pvpBase: 18, pvpMax: 75 });
 const _v = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3(), _d = new THREE.Vector3(), _fwd = new THREE.Vector3(), _right = new THREE.Vector3(), _down = new THREE.Vector3(0, -1, 0);
 
 export class Player {
@@ -158,12 +159,13 @@ export class Player {
   }
   takeDamage(amount, fromPos) {
     if (!this.alive) return;
+    if (this.ctx.tanks?.occupied(this.ctx.localPlayerId())) { this.ctx.tanks.absorbDamage(amount, fromPos); return; }
     this.hp -= amount; this.lastDamageT = 0; this.hurtFx = Math.min(1, this.hurtFx + amount / 40);
     this.ctx.effects.shakeAmt += 0.2 + amount / 80; audio.hurt(); this.ctx.input.rumble(0.8, 0.5, 160);
     if (fromPos) { _v.subVectors(fromPos, this.eye); const x = _v.dot(this.right), f = _v.dot(this.forward); this.ctx.hud.damageFrom(Math.atan2(x, f)); }
     if (this.hp <= 0) { this.hp = 0; this.die(); }
   }
-  knockback(dir, amount) { const b = this.body; b.vel.addScaledVector(dir, amount); b.vel.y += amount * 0.5; b.onGround = false; }
+  knockback(dir, amount) { if (this.ctx.tanks?.occupied(this.ctx.localPlayerId())) return; const b = this.body; b.vel.addScaledVector(dir, amount); b.vel.y += amount * 0.5; b.onGround = false; }
   // The guard only covers what is right in front of the blade: a modest reach and a narrow
   // cone, so shots from your flank still land and holding block is not a free win.
   get blockRadius() { return this.isBlocking && this.blockCd <= 0 ? 0.95 : 0; }
@@ -209,6 +211,7 @@ export class Player {
   update(dt) {
     const ctx = this.ctx, inp = ctx.input, b = this.body;
     this.lastDamageT += dt;
+    if (this.alive && ctx.tanks?.updatePlayer(this, dt)) return;
     if (!this.alive) {
       this.deathT += dt; this.eyeH = damp(this.eyeH, 0.35, 3, dt); this.roll = damp(this.roll, 0.9, 3, dt); this.pitch = damp(this.pitch, -0.35, 3, dt);
       b.vel.x = damp(b.vel.x, 0, 4, dt); b.vel.z = damp(b.vel.z, 0, 4, dt); b.vel.y -= G * dt; ctx.world.moveBody(b, dt);
@@ -335,7 +338,7 @@ export class Player {
     const st = this._weaponState(sprinting, aiming, hs2);
     if (inp.pressed('melee') && this.weapon.kind !== 'katana' && this.weaponAllowed(this.katanaIndex) && this._grenadeControlsAllowed()) { this.switchTo(this.katanaIndex); this.returnT = 0.85; this.weapons[this.katanaIndex].startSlash(st); st.meleePressed = false; }
     if (this.returnT > 0) { if (this.weapon.kind === 'katana' && (st.firePressed || st.aim || st.meleePressed)) this.returnT = 0; else { this.returnT -= dt; if (this.returnT <= 0) this.switchTo(this.prevWeaponIndex); } }
-    this.firing = st.fire && this.weapon.isGun;
+    this.firing = (st.fire && this.weapon.isGun) || (this.weapon.kind === 'grenade' && this.weapon.bashing);
     this.weapon.animate(dt, st);
     ctx.hud.setAds(this.weapon.isGun && this.weapon.aimAmt > 0.55);
     ctx.hud.setScope(!!this.weapon.scope && this.weapon.aimAmt > 0.62);
@@ -404,14 +407,21 @@ export class Player {
   _processGrenadeEvents(until, cancel = false) {
     const events = this.ctx.input.holdEventsAfter(this._nadeInputSeq, until);
     if (cancel) events.push({ action: 'nadeCancel', down: true, time: until });
-    const isCancel = (event) => event.down && ['nadeCancel', 'aim', 'melee'].includes(event.action);
+    const isCancel = (event) => event.down && ['nadeCancel', 'melee'].includes(event.action);
     // Cancellation wins ties; all other events keep their physical order, even between frames.
     events.sort((a, b) => a.time - b.time || Number(isCancel(b)) - Number(isCancel(a)) || (a.seq ?? Infinity) - (b.seq ?? Infinity));
     let cancelledAt = null;
     for (const event of events) {
       if (event.seq) this._nadeInputSeq = Math.max(this._nadeInputSeq, event.seq);
+      if (!this.alive) continue;
       const { action, down, time } = event;
       if (isCancel(event)) cancelledAt = time;
+      if (action === 'aim') {
+        if (down && !cancel && time !== cancelledAt && this.weapon.kind === 'grenade') {
+          this._advanceGrenadeCharge(time); this.weapon.bash();
+        }
+        continue;
+      }
       if (action === 'fire' || action === 'grenade') {
         if (down) {
           this._nadeChargeSources.add(action);
@@ -437,6 +447,7 @@ export class Player {
         else if (action === 'reload') this._primeGrenade(true, this._grenadeEventEpoch(time));
       } else if (isCancel(event)) this._cancelGrenadeState(time);
     }
+    if (!this.alive) { this._cancelGrenadeState(until); return; }
     this._advanceGrenadeCharge(until);
   }
   _advanceGrenadeCharge(until, announce = true, inclusive = true) {
@@ -641,9 +652,10 @@ export class Player {
     ctx.effects.boom(c, R); audio.explosion(c); ctx.input.rumble(0.9, 0.9, 220); ctx.effects.shakeAmt += 0.1 + R * 0.03;
     const mine = o.mine !== false;
     if (mine) { ctx.enemies.blastEnemies(c, R, o.enemyDmg || 120, null); if (ctx.blastBreakables) ctx.blastBreakables(c, R); }
+    if (mine) ctx.tanks?.blast(c, hurtR, (o.pvpBase ?? 12) + (o.pvpMax ?? 50), { source: o.source || 'grenade', gid: ctx.currentGrenadeId, owner: ctx.currentGrenadeOwner || ctx.localPlayerId(), round: ctx.match?.state?.round, life: ctx.currentGrenadeLife });
     // me: my own explosion, or anyone else's that went off on my screen
     const d = this.center.distanceTo(c);
-    if (o.selfDamage !== false && this.alive && d < hurtR) { this.takeDamage((o.selfBase ?? 10) + (o.selfMax ?? 34) * (1 - d / hurtR), c); this.knockback(_v.subVectors(this.center, c).normalize(), o.push || 9); }
+    if (o.selfDamage !== false && this.alive && !ctx.tanks?.occupied(ctx.localPlayerId()) && d < hurtR) { this.takeDamage((o.selfBase ?? 10) + (o.selfMax ?? 34) * (1 - d / hurtR), c); this.knockback(_v.subVectors(this.center, c).normalize(), o.push || 9); }
     // other players in a versus match, decided by whoever set it off
     if (mine && ctx.targets) for (const t of ctx.targets()) { if (t.isLocal || !t.alive || (ctx.canHurt && !ctx.canHurt(t))) continue; const dd = t.center.distanceTo(c); if (dd < hurtR) t.takeDamage((o.pvpBase ?? 12) + (o.pvpMax ?? 50) * (1 - dd / hurtR), c); }
   }
@@ -652,13 +664,13 @@ export class Player {
     ctx.currentGrenadeId = n.charged ? n.id : null; ctx.currentGrenadeOwner = n.owner || null; ctx.currentGrenadeLife = n.life;
     try {
       if (ctx.match?.active() && (!ctx.match.canFight() || (n.round != null && n.round !== ctx.match.state.round))) return;
-      if (ctx.match?.active() && !ctx.match.actor(n.owner)) { this.explode(n.pos, { mine: false, selfDamage: false }); return; }
+      if (ctx.match?.active() && !ctx.match.actor(n.owner)) { this.explode(n.pos, { ...GRENADE_BLAST, mine: false, selfDamage: false }); return; }
       const bot = ctx.match?.active() && (n.bot || ctx.match.actor(n.owner)?.bot);
-      if (bot && n.mine && ctx.match.canHurt(n.owner, ctx.match.net.id) && this.alive) {
-        const at = n.pos.clone(); at.y += .25; const d = this.center.distanceTo(at), radius = 6.4 * .95;
-        if (d < radius) ctx.match.net.send('bothit', { id: n.owner, to: ctx.match.net.id, k: 'grenade', round: ctx.match.state.round, life: n.life, targetLife: ctx.match.actor(ctx.match.net.id)?.life, gid: n.id, at: at.toArray(), dmg: Math.round(12 + 50 * (1 - d / radius)) });
+      if (bot && n.mine && ctx.match.canHurt(n.owner, ctx.match.net.id) && this.alive && !ctx.tanks?.occupied(ctx.match.net.id)) {
+        const at = n.pos.clone(); at.y += .25; const d = this.center.distanceTo(at), radius = GRENADE_BLAST.R * .95;
+        if (d < radius) ctx.match.net.send('bothit', { id: n.owner, to: ctx.match.net.id, k: 'grenade', round: ctx.match.state.round, life: n.life, targetLife: ctx.match.actor(ctx.match.net.id)?.life, gid: n.id, at: at.toArray(), dmg: Math.round(GRENADE_BLAST.pvpBase + GRENADE_BLAST.pvpMax * (1 - d / radius)) });
       }
-      this.explode(n.pos, { mine: n.mine, selfDamage: ctx.match?.active() ? n.mine && !bot : !n.charged || n.mine });
+      this.explode(n.pos, { ...GRENADE_BLAST, mine: n.mine, selfDamage: ctx.match?.active() ? n.mine && !bot : !n.charged || n.mine });
     }
     finally { ctx.currentGrenadeId = oldId; ctx.currentGrenadeOwner = oldOwner; ctx.currentGrenadeLife = oldLife; }
   }

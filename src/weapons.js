@@ -267,6 +267,11 @@ export class Gun extends ViewModel {
     let end, hit = false, stopped = true;
     // other players in a versus match are targets too; the closest thing along the ray wins
     const hitP = ctx.raycastPlayers ? ctx.raycastPlayers(origin, dir, maxDist) : null;
+    const hitT = ctx.tanks?.raycast(origin, dir, maxDist);
+    if (hitT && (!hitE || hitT.dist < hitE.dist) && (!hitW || hitW.box.data.tankHull || hitT.dist < hitW.dist) && (!hitP || hitT.dist < hitP.dist)) {
+      ctx.tanks.hit(this.damage, { source: this.kind, point: hitT.point, origin: muzzle || origin, dir });
+      return { end: hitT.point, hit: true, stopped: true };
+    }
     if (hitP && (!hitE || hitP.dist < hitE.dist) && (!hitW || hitP.dist < hitW.dist)) {
       end = hitP.point; const crit = hitP.part === 'head'; const pv = this.pvp || [this.damage, this.headMul, this.falloff];
       const far = travelled + hitP.dist; let d = pv[0] * (crit ? pv[1] : 1);
@@ -418,12 +423,12 @@ export class Rocket extends Gun {
 
 export class Grenade extends ViewModel {
   constructor(ctx) {
-    super(ctx); this.name = 'GRENADES'; this.hint = 'hold to charge and aim - R pulls pin, release throws, RMB / V cancels or drops'; this.kind = 'grenade'; this.locked = true;
+    super(ctx); this.name = 'GRENADES'; this.hint = 'hold to charge and aim - R pulls pin, release throws, RMB bashes, V cancels or drops'; this.kind = 'grenade'; this.locked = true;
     this.scale = 0.32; this.root.scale.setScalar(this.scale);
     this.basePos.set(0.24, -0.2, -0.44); this.aimPos.copy(this.basePos);
     this.grip = new THREE.Group(); this.root.add(this.grip);
     this.payload = new THREE.Group(); this.grip.add(this.payload);
-    this.raise = 0; this.throwAt = null; this.poseAt = performance.now();
+    this.raise = 0; this.throwAt = null; this.bashAt = null; this.bashReadyAt = 0; this.poseAt = performance.now();
     this.wrist = new THREE.Vector3(); this.elbow = new THREE.Vector3(); this.shoulder = new THREE.Vector3(1.45, -1.35, 1.3);
     const mat = this.mat = makeInkMaterial({ ink: INK.BLUE, surface: 'metal' }), dark = makeInkMaterial({ ink: INK.BLACK, surface: 'metal' }), orange = makeInkMaterial({ ink: INK.ORANGE, surface: 'metal' });
     sph(0.16, 0, 0, 0, dark, this.payload);
@@ -439,6 +444,37 @@ export class Grenade extends ViewModel {
     this.ctx.camera.userData.translucentViewModel = this.root;
   }
   get spreadPx() { return 4; }
+  get bashing() { return this.bashAt !== null && performance.now() - this.bashAt < 270; }
+  bash() {
+    const ctx = this.ctx, P = ctx.player, now = performance.now();
+    if (!this.allowed || P.weapon !== this || P.weaponRules.key !== 'grenades' || !P._grenadeControlsAllowed() ||
+      ctx.hud.el?.board?.hidden === false || ctx.tanks?.occupied() || now < this.bashReadyAt ||
+      (P._heldNade && P._heldNade.expiresAt <= P._grenadeNow()) ||
+      (this.throwAt !== null && now - this.throwAt < 380)) return false;
+    this.throwAt = null; this.bashAt = now; this.bashReadyAt = now + 330; P.shieldT = 0;
+    audio.katanaSwing(); P.kickFov(1.2);
+    const dir = P.forward.clone(), info = { source: 'grenadeBash', dir, part: 'torso', crit: false };
+    let any = false;
+    // Explosive enemies can kill the wielder during damage callbacks; stop the remaining hit list.
+    for (const { enemy } of ctx.enemies.inArc(P.eye, P.forward, 3, Math.cos(.95))) {
+      if (!P._grenadeControlsAllowed()) return true;
+      if (!ctx.world.hasLineOfSight(P.eye, enemy.center)) continue;
+      ctx.enemies.damage(enemy, 75, { ...info, point: enemy.center.clone() }); any = true;
+    }
+    for (const target of ctx.playersInArc?.(P.eye, P.forward, 3, Math.cos(.95)) || []) {
+      if (!P._grenadeControlsAllowed()) return true;
+      ctx.hitPlayer(target, 55, { ...info, point: target.center.clone() }); any = true;
+    }
+    for (const br of ctx.breakablesInArc?.(P.eye, P.forward, 3.2, Math.cos(1)) || []) {
+      if (!P._grenadeControlsAllowed()) return true;
+      if (!ctx.world.hasLineOfSight(P.eye, br.pos, b => b === br.box)) continue;
+      ctx.breakHit(br, 75, br.pos.clone(), dir); any = true;
+    }
+    if (!P._grenadeControlsAllowed()) return true;
+    if (ctx.tanks?.melee(P.eye, P.forward, 3.2, 75, { source: 'grenadeBash', origin: P.eye })) any = true;
+    if (any) { audio.katanaHit(); ctx.game.hitstop(.045, .25); ctx.input.rumble(.35, .25, 70); }
+    return true;
+  }
   _buildThrowingArm() {
     const cloth = viewMaterial('cloth', this._appearanceInk), skin = viewMaterial('skin', this.appearance.tone), glove = viewMaterial('cloth');
     const segment = (r1, r2) => {
@@ -471,11 +507,11 @@ export class Grenade extends ViewModel {
     _v.subVectors(to, from); segment.position.copy(from).addScaledVector(_v, 0.5);
     segment.scale.set(1, _v.length(), 1); segment.quaternion.setFromUnitVectors(_v2.set(0, 1, 0), _v.normalize());
   }
-  resetThrowPose() { this.throwAt = null; this.raise = 0; this.payload.visible = true; this.poseAt = performance.now(); }
+  resetThrowPose() { this.throwAt = null; this.bashAt = null; this.raise = 0; this.payload.visible = true; this.poseAt = performance.now(); }
   equip() { this.resetThrowPose(); super.equip(); }
   unequip() { this.resetThrowPose(); super.unequip(); }
   // A quick release can interrupt the raise; start the swing at that pose rather than snapping to full charge.
-  onGrenadeThrow(charge = 0) { this.throwAt = performance.now(); this.throwCharge = charge; this.throwRaise = this.raise; this.payload.visible = false; }
+  onGrenadeThrow(charge = 0) { this.bashAt = null; this.throwAt = performance.now(); this.throwCharge = charge; this.throwRaise = this.raise; this.payload.visible = false; }
   update() {
     const state = this.ctx.player?.grenadeStatus, held = !!state && state.state !== 'idle';
     const now = performance.now(), dt = Math.max(0, (now - this.poseAt) / 1000); this.poseAt = now;
@@ -499,6 +535,11 @@ export class Grenade extends ViewModel {
     } else {
       p.x += this.raise * 0.1; p.y += this.raise * 0.13; p.z -= this.raise * 0.05;
       r.x -= this.raise * 0.18; r.z -= this.raise * 0.12;
+    }
+    if (!throwing && this.bashing) {
+      const strike = Math.sin(Math.PI * clamp((now - this.bashAt) / 270, 0, 1));
+      p.x -= strike * .12; p.y += strike * .045; p.z -= strike * .24;
+      r.x -= strike * .7; r.z += strike * .35; reach = strike;
     }
     this.root.scale.setScalar(lerp(this.scale, 0.23, this.raise)); this.root.userData.viewOpacity = lerp(0.68, 0.44, this.raise);
     this.grip.rotation.set(0.08 - open * 0.5, -0.12, -0.1);
@@ -633,6 +674,7 @@ export class Katana extends ViewModel {
     if (ctx.cutRopes && ctx.cutRopes(P.eye, P.forward, 3.4)) any = true;
     if (ctx.breakablesInArc) for (const br of ctx.breakablesInArc(P.eye, P.forward, 3.2, Math.cos(1.0))) { any = true; ctx.breakHit(br, this.damage * multiplier, br.pos.clone(), _v2.clone()); }
     if (P.lookUse && ctx.pressButton) { ctx.pressButton(P.lookUse, true); any = true; }
+    if (ctx.tanks?.melee(P.eye, P.forward, 3.2, this.damage * multiplier, { source: 'katana', charge: (multiplier - 1) / 2, origin: P.eye })) any = true;
     // a swing only cuts; bullets are turned aside by the raised guard, never by a slash
     if (any) { audio.katanaHit(); ctx.game.hitstop(0.07, 0.12); ctx.effects.shakeAmt += 0.12; ctx.input.rumble(0.7, 0.4, 90); this.recoil.kick(0, 0, 1.5); }
   }
