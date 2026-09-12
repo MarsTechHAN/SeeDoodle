@@ -4,8 +4,8 @@ import { makeInkMaterial, INK } from './render.js';
 
 export const TANK_HP = 88888;
 const HALF = 1.5, HEIGHT = 2.2, ENTER = 3.5, STOP = .35, PULL = 1.5, FIRE_TIME = 1.5;
-const DAMAGE = { rifle: 35, shotgun: 190, sniper: 225, revolver: 154, katana: 225, grenade: 93, rocket: 480, tank: 250 };
-const RATE = { rifle: .065, shotgun: .55, sniper: .8, revolver: .2, katana: .25, grenade: .05, rocket: .55, tank: 1.35 };
+const DAMAGE = { rifle: 35, shotgun: 190, sniper: 225, revolver: 154, katana: 225, grenadeBash: 75, grenade: 93, rocket: 480, tank: 250 };
+const RATE = { rifle: .065, shotgun: .55, sniper: .8, revolver: .2, katana: .25, grenadeBash: .3, grenade: .05, rocket: .55, tank: 1.35 };
 const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
 const vec = a => new THREE.Vector3().fromArray(a);
 const xyz = a => Array.isArray(a) && a.length === 3 && a.every(n => Number.isFinite(n) && Math.abs(n) < 10000);
@@ -265,7 +265,7 @@ export class TankSystem {
   }
   melee(pos, dir, range, amount, info = {}) {
     const hit = this.raycast(pos, dir, range); if (!hit || !this.ctx.world.hasLineOfSight(pos, hit.point, transparent)) return false;
-    return this.hit(amount, { ...info, source: 'katana', point: hit.point });
+    return this.hit(amount, { ...info, source: info.source || 'katana', point: hit.point });
   }
   absorbDamage(amount, from) {
     if (!this.occupied() || !this.ctx.player.alive) return false;
@@ -289,7 +289,7 @@ export class TankSystem {
     else if (d.blast) {
       if (!xyz(d.center) || !Number.isFinite(d.radius) || d.radius <= 0 || d.radius > radius + .1) return;
       origin = vec(d.center); if (origin.distanceTo(point) > d.radius + 2 || origin.distanceTo(p.body.pos) > 160) return;
-    } else if (origin.distanceTo(point) > (d.source === 'katana' ? 7 : 300)) return;
+    } else if (origin.distanceTo(point) > (d.source === 'katana' || d.source === 'grenadeBash' ? 7 : 300)) return;
     if (!enemy && !this.ctx.world.hasLineOfSight(origin, point, transparent)) return;
     const key = `${from}:${d.source}`, last = this.damageClock.get(key);
     const pellet = d.source === 'shotgun' && last && now - last.at < 45 && last.amount < DAMAGE.shotgun;

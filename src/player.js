@@ -372,7 +372,7 @@ export class Player {
     const st = this._weaponState(sprinting, aiming, hs2);
     if (inp.pressed('melee') && this.weapon.kind !== 'katana' && this.weaponAllowed(this.katanaIndex) && this._grenadeControlsAllowed()) { this.switchTo(this.katanaIndex); this.returnT = 0.85; this.weapons[this.katanaIndex].startSlash(st); st.meleePressed = false; }
     if (this.returnT > 0) { if (this.weapon.kind === 'katana' && (st.firePressed || st.aim || st.meleePressed)) this.returnT = 0; else { this.returnT -= dt; if (this.returnT <= 0) this.switchTo(this.prevWeaponIndex); } }
-    this.firing = st.fire && this.weapon.isGun;
+    this.firing = (st.fire && this.weapon.isGun) || (this.weapon.kind === 'grenade' && this.weapon.bashing);
     this.weapon.animate(dt, st);
     ctx.hud.setAds(this.weapon.isGun && this.weapon.aimAmt > 0.55);
     ctx.hud.setScope(!!this.weapon.scope && this.weapon.aimAmt > 0.62);
@@ -428,14 +428,21 @@ export class Player {
   _processGrenadeEvents(until, cancel = false) {
     const events = this.ctx.input.holdEventsAfter(this._nadeInputSeq, until);
     if (cancel) events.push({ action: 'nadeCancel', down: true, time: until });
-    const isCancel = (event) => event.down && ['nadeCancel', 'aim', 'melee'].includes(event.action);
+    const isCancel = (event) => event.down && ['nadeCancel', 'melee'].includes(event.action);
     // Cancellation wins ties; all other events keep their physical order, even between frames.
     events.sort((a, b) => a.time - b.time || Number(isCancel(b)) - Number(isCancel(a)) || (a.seq ?? Infinity) - (b.seq ?? Infinity));
     let cancelledAt = null;
     for (const event of events) {
       if (event.seq) this._nadeInputSeq = Math.max(this._nadeInputSeq, event.seq);
+      if (!this.alive) continue;
       const { action, down, time } = event;
       if (isCancel(event)) cancelledAt = time;
+      if (action === 'aim') {
+        if (down && !cancel && time !== cancelledAt && this.weapon.kind === 'grenade') {
+          this._advanceGrenadeCharge(time); this.weapon.bash();
+        }
+        continue;
+      }
       if (action === 'fire' || action === 'grenade') {
         if (down) {
           this._nadeChargeSources.add(action);
@@ -461,6 +468,7 @@ export class Player {
         else if (action === 'reload') this._primeGrenade(true, this._grenadeEventEpoch(time));
       } else if (isCancel(event)) this._cancelGrenadeState(time);
     }
+    if (!this.alive) { this._cancelGrenadeState(until); return; }
     this._advanceGrenadeCharge(until);
   }
   _advanceGrenadeCharge(until, announce = true, inclusive = true) {

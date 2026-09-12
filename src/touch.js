@@ -87,7 +87,7 @@ export class TouchControls {
       e.preventDefault();
       const a = btn.dataset.a;
       if (btn.classList.contains('gone') || (this._driving && !['fire', 'jump', 'vehicle', 'score', 'pause'].includes(a))) return;
-      if (a === 'aim') { this.aimOn = !this.aimOn; btn.classList.toggle('on', this.aimOn); this.ptrs.set(e.pointerId, { kind: 'tap' }); return; }
+      if (a === 'aim' && this._weaponMode !== 'grenades') { this.aimOn = !this.aimOn; btn.classList.toggle('on', this.aimOn); this.ptrs.set(e.pointerId, { kind: 'tap', a }); return; }
       this._press(a); btn.classList.add('on');
       // the fire button doubles as a look pad: one thumb has to be able to shoot and track at once
       this.ptrs.set(e.pointerId, { kind: 'btn', a, btn, x: e.clientX, y: e.clientY, look: a === 'fire' });
@@ -188,13 +188,14 @@ export class TouchControls {
   }
 
   setWeaponMode(mode) {
-    if (mode === this._weaponMode) return; this._weaponMode = mode; this.clearAim();
+    if (mode === this._weaponMode) return; this._weaponMode = mode; this.clearAim(); this._clearAction('aim');
     const grenades = mode === 'grenades', knives = mode === 'knives';
     for (const action of ['grenade', 'melee', 'reload', 'aim']) {
-      const hidden = action === 'grenade' ? false : action === 'melee' || action === 'aim' ? grenades : grenades || knives;
+      const hidden = action === 'grenade' || action === 'aim' ? false : action === 'melee' ? grenades : grenades || knives;
       for (const el of this.btnEls[action] || []) el.classList.toggle('gone', hidden);
       if (hidden) { delete this.frames[action]; this.input.markTouchHold(action, false); }
     }
+    for (const el of this.btnEls.aim || []) el.textContent = ts(grenades ? 'BASH' : 'AIM');
     this._syncFireFace();
     this._grenadeKey = null; this.setGrenadeState(this._grenadeState);
   }
@@ -273,6 +274,7 @@ export const TOUCH_CONTROLS_HTML = `
     <div><b>KATANA</b> full charge in 0.8 seconds = 3x damage</div>
     <div><b>AIM</b> is a toggle: tap once to sight in, again to come out</div>
     <div><b>THROW</b> in grenades only: hold and drag to aim, release to throw</div>
+    <div><b>BASH</b> in grenades only: tap to strike; keeps throw charge and the live fuse</div>
     <div><b>PULL PIN</b> starts the 7-second fuse and locks the current throw power</div>
     <div><b>Full charge</b> stays safe by default; automatic pin pull is optional in settings</div>
     <div><b>CANCEL</b> stows a safe grenade; after pulling the pin, DROP leaves it at your feet</div>

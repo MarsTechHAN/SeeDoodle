@@ -299,8 +299,8 @@ export class HUD {
   }
 }
 
-export const KB_KEYS = { fire: 'LMB', aim: 'RMB', block: 'RMB', jump: 'Space', sprint: 'Shift', slide: 'C', dash: 'C', grapple: 'Q', melee: 'F', reload: 'R', grenade: 'G', focus: 'both mouse buttons (or X)', next: 'wheel', pause: 'Esc', confirm: 'Space', score: 'Tab', nadePin: 'R', nadeCancel: 'RMB / V', interact: 'B', bombDrop: 'N', vehicle: 'H' };
-export const PAD_KEYS = { fire: 'R2', aim: 'L2', block: 'L2', jump: '✕', sprint: 'L3', slide: '○', dash: '○', grapple: 'L1', melee: 'R1', reload: '□', grenade: 'R3', focus: 'L2 + R2', next: '△', pause: 'Options', confirm: '✕', score: 'Create', nadePin: '□', nadeCancel: 'L2 / R1', interact: 'D-pad down', bombDrop: 'N', vehicle: 'D-pad right' };
+export const KB_KEYS = { fire: 'LMB', aim: 'RMB', block: 'RMB', jump: 'Space', sprint: 'Shift', slide: 'C', dash: 'C', grapple: 'Q', melee: 'F', reload: 'R', grenade: 'G', focus: 'both mouse buttons (or X)', next: 'wheel', pause: 'Esc', confirm: 'Space', score: 'Tab', nadePin: 'R', nadeCancel: 'V / F', interact: 'B', bombDrop: 'N', vehicle: 'H' };
+export const PAD_KEYS = { fire: 'R2', aim: 'L2', block: 'L2', jump: '✕', sprint: 'L3', slide: '○', dash: '○', grapple: 'L1', melee: 'R1', reload: '□', grenade: 'R3', focus: 'L2 + R2', next: '△', pause: 'Options', confirm: '✕', score: 'Create', nadePin: '□', nadeCancel: 'R1', interact: 'D-pad down', bombDrop: 'N', vehicle: 'D-pad right' };
 export const CONTROLS_HTML = `
 <div class="cols">
   <div><div class="colhead">MOUSE + KEYBOARD</div>
@@ -316,7 +316,8 @@ export const CONTROLS_HTML = `
     <div><b>LMB / G</b> in grenades only: hold to charge, release to throw</div>
     <div><b>R</b> pulls the pin while holding: 7-second fuse, current throw power locked</div>
     <div><b>Full charge</b> stays safe by default; automatic pin pull is optional in settings</div>
-    <div><b>RMB / V</b> cancels before pulling the pin; drops a live grenade</div>
+    <div><b>RMB</b> in grenades only: bash without cancelling the charge or fuse</div>
+    <div><b>V / F</b> cancels before pulling the pin; drops a live grenade</div>
     <div><b>Tab</b> hold for map and scores; wheel scrolls players &nbsp; <b>Esc</b> pause</div>
     <div><b>Both mouse buttons</b> dash-slash once the gauge is lit</div>
     <div><b>1-4 / wheel</b> rifle · shotgun · sniper · katana</div>
@@ -336,7 +337,8 @@ export const CONTROLS_HTML = `
     <div><b>R2 / R3</b> in grenades only: hold to charge, release to throw</div>
     <div><b>□</b> pulls the pin while holding: 7-second fuse, current throw power locked</div>
     <div><b>Full charge</b> stays safe by default; automatic pin pull is optional in settings</div>
-    <div><b>L2 / R1</b> cancels or drops the grenade</div>
+    <div><b>L2</b> in grenades only: bash without cancelling the charge or fuse</div>
+    <div><b>R1</b> cancels or drops the grenade</div>
     <div><b>Create</b> toggle map and scores &nbsp; <b>Options</b> pause</div>
     <div><b>D-pad right</b> tank: enter / exit; hold beside a stopped tank to pull the driver out</div>
     <div><b>✕</b> tank brake; movement steers and fire shoots the cannon</div>

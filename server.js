@@ -391,6 +391,7 @@ const ARMS = {
   sniper: { max: 150 * 1.5, rate: 5, burst: 3, reach: 300, mv: 450 },
   revolver: { max: 52 * 2.9, rate: 1 / 0.3, burst: 3, reach: 300, mv: 260 },
   katana: { max: 165, base: 55, rate: 3, burst: 4, reach: 4.5 },
+  grenadeBash: { max: 55, rate: 3, burst: 4, reach: 4.5 },
   grenade: { max: 93, rate: 1.25, burst: 8, reach: 9.6 * 0.95 },
   tank: { max: 250, rate: 1 / 1.5, burst: 1, reach: 240 },
 };
@@ -671,6 +672,10 @@ function resolveHit(client, m) {
     const charge = m.charge === undefined ? 0 : m.charge;
     if (!Number.isFinite(charge) || charge < 0 || charge > 1) return deny('invalid slash charge');
     damageCap = Math.round(arm.base * (1 + 2 * charge));
+  } else if (m.k === 'grenadeBash') {
+    // The grenade stays intact: a bash has neither a fuse nor a charged-knife multiplier.
+    if (m.charge !== undefined && m.charge !== 0) return deny('invalid grenade bash charge');
+    damageCap = arm.max;
   }
   if (!(dmg > 0) || dmg > damageCap) return deny('damage out of range');
   const recordedGrenade = m.k === 'grenade' && m.gid != null;
@@ -713,7 +718,7 @@ function resolveHit(client, m) {
       grenade.blast = at;
       grenade.victims.add(victim.id);
     } else if (selfNow && len3(sub(at, [selfNow.x, selfNow.y, selfNow.z])) > 45) return deny('blast nowhere near the thrower');
-  } else if (m.k === 'katana') {
+  } else if (m.k === 'katana' || m.k === 'grenadeBash') {
     if (!selfNow) return deny('shooter never reported a position');
     const gap = len3(sub([selfNow.x, selfNow.y + 0.9, selfNow.z], [target[0], target[1] + 0.9, target[2]]));
     if (gap > arm.reach) return deny('out of reach');

@@ -240,7 +240,8 @@ export class RemotePlayer {
       const g = this.blocking ? 1 : 0;
       J.armR.rotation.x = -0.9 - g * 0.9 - s * 0.6 * w * (1 - g); J.armR.rotation.z = -0.3 - g * 0.5; J.foreR.rotation.x = -1.0 - g * 0.6; J.armL.rotation.x = s * 0.8 * w * (1 - g) - g * 1.4; J.foreL.rotation.x = -0.5;
     } else if (grenade) {
-      J.armR.rotation.x = -0.8 - s * 0.3 * w; J.armR.rotation.z = -0.2; J.foreR.rotation.x = -0.7;
+      this.bashPose = damp(this.bashPose || 0, this.firing ? 1 : 0, 22, dt);
+      J.armR.rotation.x = -0.8 - s * 0.3 * w - this.bashPose * 1.1; J.armR.rotation.z = -0.2; J.foreR.rotation.x = -0.7 + this.bashPose * .55;
       J.armL.rotation.x = s * 0.8 * w; J.armL.rotation.y = 0; J.foreL.rotation.x = -0.3;
     } else {
       J.armR.rotation.x = (-1.35 - look * 0.85) * aim - s * 0.6 * w * (1 - aim); J.armR.rotation.z = -0.2 * (1 - aim); J.foreR.rotation.x = -0.2;

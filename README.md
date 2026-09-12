@@ -104,6 +104,11 @@ blast radius is 9.6 m, the effective damage radius is 9.12 m, and the maximum Pv
 The same scaling applies to bots, PvE damage and self-damage. Fuse timing and throwing distance
 are unchanged; rocket explosion tuning remains separate.
 
+In grenades-only matches, **right mouse / L2** or the momentary touch **BASH** button strikes
+with the grenade, using the light katana attack's damage and reach. Bashing preserves a held
+throw's charge and does not stop or reset a live fuse. **V / F**, controller **R1**, or the touch
+**CANCEL / DROP** button still cancels a safe throw or drops an armed grenade at your feet.
+
 ### Maps
 
 **DOODLE DISTRICT** is the original: streets, rooftops and fire escapes, and it is where the waves
