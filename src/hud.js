@@ -1,6 +1,6 @@
 // DOM heads-up display drawn in "pen" style (multiplied over the paper canvas).
 import { TOUCH_KEYS } from './touch.js';
-import { ts, trDom } from './i18n.js';
+import { ts, trDom, onLangChange } from './i18n.js';
 export class HUD {
   constructor(root) {
     this.root = root;
@@ -33,15 +33,27 @@ export class HUD {
       <div class="tip" id="tip"></div>
       <div class="message"><div class="msg-main" id="msg"></div><div class="msg-sub" id="msgsub"></div></div>
       <div class="killfeed" id="killfeed"></div>
-      <div class="screen" id="screen"><div class="panel" id="panel"></div></div>`;
+      <div class="screen" id="screen"><div class="panel" id="panel"></div></div>
+      <div class="chat" id="chat" hidden>
+        <div class="chat-log" id="chatlog"></div>
+        <button type="button" class="chat-hint" id="chathint"></button>
+        <form class="chat-bar" id="chatbar" hidden>
+          <button type="button" class="chat-scope" id="chatscope"></button>
+          <input id="chatinput" maxlength="80" autocomplete="off" spellcheck="false" enterkeyhint="send">
+        </form>
+      </div>`;
     trDom(root);
     const q = (id) => root.querySelector('#' + id);
-    this.el = { crosshair: q('crosshair'), gret: q('gret'), hitmarker: q('hitmarker'), dmg: q('dmg'), score: q('score'), combo: q('combo'), wave: q('wave'), modifier: q('modifier'), left: q('left'), timer: q('timer'), netpath: q('netpath'), hpfill: q('hpfill'), hpnum: q('hpnum'), mag: q('mag'), reserve: q('reserve'), reloading: q('reloading'), tally: q('tally'), weapon: q('weapon'), hint: q('hint'), slots: q('slots'), tip: q('tip'), msg: q('msg'), msgsub: q('msgsub'), killfeed: q('killfeed'), screen: q('screen'), panel: q('panel'), nades: q('nades'), scope: q('scope'), focusmark: q('focusmark'), focusmeter: q('focusmeter'), fmfill: q('fmfill'), bossbar: q('bossbar'), bossname: q('bossname'), bossfill: q('bossfill'), pvpscore: q('pvpscore'), board: q('board'), gstam: q('gstam'), gstamfill: q('gstamfill'), cyc: q('cyc'), stam: q('stam'), stamfill: q('stamfill') };
+    this.el = { crosshair: q('crosshair'), gret: q('gret'), hitmarker: q('hitmarker'), dmg: q('dmg'), score: q('score'), combo: q('combo'), wave: q('wave'), modifier: q('modifier'), left: q('left'), timer: q('timer'), netpath: q('netpath'), hpfill: q('hpfill'), hpnum: q('hpnum'), mag: q('mag'), reserve: q('reserve'), reloading: q('reloading'), tally: q('tally'), weapon: q('weapon'), hint: q('hint'), slots: q('slots'), tip: q('tip'), msg: q('msg'), msgsub: q('msgsub'), killfeed: q('killfeed'), screen: q('screen'), panel: q('panel'), nades: q('nades'), scope: q('scope'), focusmark: q('focusmark'), focusmeter: q('focusmeter'), fmfill: q('fmfill'), bossbar: q('bossbar'), bossname: q('bossname'), bossfill: q('bossfill'), pvpscore: q('pvpscore'), board: q('board'), gstam: q('gstam'), gstamfill: q('gstamfill'), cyc: q('cyc'), stam: q('stam'), stamfill: q('stamfill'), chat: q('chat'), chatlog: q('chatlog'), chatbar: q('chatbar'), chatscope: q('chatscope'), chatinput: q('chatinput'), chathint: q('chathint') };
     for (const id of ['nadestate', 'nadelabel', 'nadevalue', 'nadecharge', 'nadehint', 'knifestate', 'knifevalue', 'knifecharge', 'knifehint']) this.el[id] = q(id);
     for (const id of ['wayfinder', 'heading', 'area', 'mapkey', 'maptitle', 'mapcanvas', 'maplegend', 'boardscores', 'minimap', 'minimapcanvas']) this.el[id] = q(id);
     for (const id of ['tankhud', 'tanklabel', 'tankhp', 'tankhealth', 'tankdetail', 'tankhint', 'tankprogress', 'tankprogressfill', 'tankheading', 'tankbearing', 'tankhulldirection', 'tankheadingtext', 'tankimpact']) this.el[id] = q(id);
     this._msgT = 0; this._scope = false; this._nades = -1; this._pad = false; this.onDevice = null; this._fmShow = false; this._fmFrac = -1; this._fmReady = false; this._lastTally = -1; this._lastSlots = ''; this._ads = false; this._mode = ''; this.onScreenClick = null; this._tipT = 0; this._cycKind = ''; this._cycFrac = -1; this._touch = false; this._stamF = -1;
+    this._chatLive = false; this._chatTeams = false; this._chatOpen = false; this._chatScope = 'all';
+    this._chatLines = [];
+    this.onChatSend = null; this.onChatOpen = null; this.onChatClose = null;
     this.el.screen.addEventListener('click', () => { if (this.onScreenClick) this.onScreenClick(); });
+    this._bindChat();
   }
   // katana charge gauge: fills with katana kills, catches fire when a focus slash is ready
   setFocusMeter(show, frac, ready, label = 'KATANA') {
@@ -88,7 +100,7 @@ export class HUD {
   // control labels follow whatever you touched last
   setDevice(pad) { if (pad === this._pad) return; this._pad = pad; this.root.classList.toggle('pad', pad); if (this.onDevice) this.onDevice(pad); }
   // a phone never grows a keyboard, so touch labels win outright once we are in that mode
-  setTouch(on) { this._touch = on; this.root.classList.toggle('touch', on); }
+  setTouch(on) { this._touch = on; this.root.classList.toggle('touch', on); this._syncChatHint(); }
   key(action) { return ts((this._touch ? TOUCH_KEYS : this._pad ? PAD_KEYS : KB_KEYS)[action] || action); }
   setScope(on) { if (on === this._scope) return; this._scope = on; this.el.scope.classList.toggle('on', on); }
   setFocusMark(x, y) {
@@ -319,9 +331,91 @@ export class HUD {
   showScreen(html) { this.el.screen.inert = false; this.el.panel.innerHTML = html; trDom(this.el.panel); this.el.screen.classList.add('show'); this.el.nadestate.hidden = true; this.el.knifestate.hidden = true; this.el.minimap.hidden = true; this.setTank(null); this.root.classList.remove('minimap-on'); }
   hideScreen() { if (this.el.screen.contains(document.activeElement)) document.activeElement.blur(); this.el.screen.inert = true; this.el.screen.classList.remove('show'); }
   setGameplayVisible(v) { this.root.classList.toggle('nogame', !v); if (!v) this.setTank(null); }
+  get chatOpen() { return this._chatOpen; }
+  get chatScope() { return this._chatScope; }
+  // A real <input> is the only way IME works. Opening it drops pointer lock; main.js must
+  // not treat that as a pause, and Tab while it is focused is the channel switch, not the board.
+  _bindChat() {
+    const el = this.el;
+    el.chatscope.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this.cycleChatScope(); });
+    el.chathint.addEventListener('click', (e) => { e.stopPropagation(); if (this.onChatOpen) this.onChatOpen(); });
+    el.chatbar.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const text = el.chatinput.value.replace(/\s+/g, ' ').trim();
+      el.chatinput.value = '';
+      if (text && this.onChatSend) this.onChatSend(text, this._chatScope);
+    });
+    el.chatinput.addEventListener('keydown', (e) => {
+      if (e.code === 'Tab') { e.preventDefault(); this.cycleChatScope(); }
+      else if (e.code === 'Escape') { e.preventDefault(); e.stopPropagation(); if (this.onChatClose) this.onChatClose(); }
+    });
+    onLangChange(() => { this._paintChatScope(); this._syncChatHint(); });
+    this._paintChatScope(); this._syncChatHint();
+  }
+  setChatLive(on, teams) {
+    if (on !== this._chatLive) {
+      this._chatLive = !!on; this.el.chat.hidden = !on;
+      if (!on) { this.closeChat(); this.clearChat(); }
+    }
+    if (teams !== this._chatTeams) { this._chatTeams = !!teams; this._paintChatScope(); }
+    this._syncChatHint();
+  }
+  openChat() {
+    if (!this._chatLive || this._chatOpen) return;
+    this._chatOpen = true;
+    this.el.chat.classList.add('open'); this.el.chatbar.hidden = false;
+    for (const row of this._chatLines) { row.el.classList.remove('fade'); row.t = Math.max(row.t, 6); }
+    this._syncChatHint(); this._paintChatScope();
+    const box = this.el.chatinput; box.focus();
+    requestAnimationFrame(() => box.focus());
+  }
+  closeChat() {
+    if (!this._chatOpen) return;
+    this._chatOpen = false;
+    this.el.chat.classList.remove('open'); this.el.chatbar.hidden = true;
+    if (this.el.chatinput === document.activeElement) this.el.chatinput.blur();
+    this.el.chatinput.value = '';
+    this._syncChatHint();
+  }
+  cycleChatScope() {
+    this._chatScope = this._chatScope === 'team' ? 'all' : 'team';
+    this._paintChatScope();
+  }
+  pushChat({ name, text, scope, color, me }) {
+    const line = document.createElement('div');
+    line.className = 'chat-line ' + (scope === 'team' ? 'team' : 'all') + (me ? ' me' : '');
+    const tag = document.createElement('span'); tag.className = 'scope'; tag.textContent = ts(scope === 'team' ? 'TEAM' : 'ALL');
+    const who = document.createElement('span'); who.className = 'who'; who.textContent = name || ts('someone');
+    if (color) who.style.color = color;
+    const body = document.createElement('span'); body.className = 'body'; body.textContent = text;
+    line.append(tag, who, body);
+    this.el.chatlog.appendChild(line);
+    this._chatLines.push({ el: line, t: 8 });
+    while (this._chatLines.length > 40) this._chatLines.shift().el.remove();
+    this.el.chatlog.scrollTop = this.el.chatlog.scrollHeight;
+    this._syncChatHint();
+  }
+  clearChat() { this._chatLines = []; this.el.chatlog.replaceChildren(); this._syncChatHint(); }
+  _paintChatScope() {
+    const team = this._chatScope === 'team';
+    this.el.chatscope.textContent = ts(team ? 'TEAM' : 'ALL');
+    this.el.chatscope.classList.toggle('team', team);
+    this.el.chatinput.placeholder = ts(team ? 'to teammates' : 'to everyone');
+    this.el.chatscope.title = ts('Tab: teammates / everyone');
+  }
+  _syncChatHint() {
+    const show = this._chatLive && !this._chatOpen;
+    this.el.chathint.hidden = !show;
+    if (show) this.el.chathint.textContent = this._touch ? ts('tap to chat') : ts('Enter · chat');
+  }
   update(dt) {
     if (this._msgT > 0) { this._msgT -= dt; if (this._msgT <= 0) { this.el.msg.classList.remove('show'); this.el.msgsub.textContent = ''; } }
     if (this._tipT > 0) { this._tipT -= dt; if (this._tipT <= 0) this.el.tip.classList.remove('show'); }
+    if (!this._chatOpen) {
+      for (const row of this._chatLines) {
+        if (row.t > 0) { row.t -= dt; if (row.t <= 0) row.el.classList.add('fade'); }
+      }
+    }
   }
 }
 
@@ -345,6 +439,7 @@ export const CONTROLS_HTML = `
     <div><b>RMB</b> in grenades only: bash without cancelling the charge or fuse</div>
     <div><b>V / F</b> cancels before pulling the pin; drops a live grenade</div>
     <div><b>Tab</b> hold for map and scores; wheel scrolls players &nbsp; <b>Esc</b> pause</div>
+    <div><b>Enter</b> open chat &nbsp; <b>Tab</b> teammates / everyone</div>
     <div><b>Both mouse buttons</b> dash-slash once the gauge is lit</div>
     <div><b>1-4 / wheel</b> rifle · shotgun · sniper · katana</div>
     <div><b>H</b> tank: enter / exit; hold beside a stopped tank to pull the driver out</div>

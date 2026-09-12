@@ -24,9 +24,15 @@ const RETRY_MS = [200, 400, 900, 1800, 3000, 4000];
 
 // The room server is whichever machine served this page. There is nothing to configure: you opened
 // somebody's link, so they are the server, and everyone who opened the same link lands together.
+// `/nightly` is a second process on the same host, so the socket has to stay under that prefix.
+function mountPrefix() {
+  if (typeof location === 'undefined') return '';
+  const p = location.pathname;
+  return p === '/nightly' || p.startsWith('/nightly/') ? '/nightly' : '';
+}
 function serverURL() {
   if (typeof location !== 'undefined' && /^https?:$/.test(location.protocol)) {
-    return `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`;
+    return `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}${mountPrefix()}/ws`;
   }
   return `ws://localhost:${DEFAULT_PORT}/ws`;
 }
@@ -74,7 +80,7 @@ async function wtSocket(wt) {
       if (sock.readyState === 3) return;
       sock.readyState = 3;
       try { wt.close(); } catch (e) { /* already gone */ }
-      if (sock.onclose) sock.onclose();
+      if (sock.onclose) sock.onclose({ code: 0, reason: 'wt-close', wasClean: true });
     },
   };
   const emit = (payload, binary) => {
@@ -132,6 +138,28 @@ export class Net {
     this.authority = null; this.path = 'offline'; this.battlefieldMax = 128;
     this._seq = 0; this._ack = 0; this._ackBits = 0; this._pred = []; this._inTick = 0;
     this._wt = null; this._wtWrite = null;
+    this._logs = [];
+  }
+  // Close codes and resume failures die with the tab unless we keep a short ring and
+  // POST them back. The room process greps `NET client` for the same events.
+  _netlog(event, extra = {}) {
+    const row = {
+      t: Date.now(), event, path: this.path, id: this.id, code: this.code,
+      connected: this.connected, authority: this.authority, inMatch: this._inMatch, ...extra,
+    };
+    this._logs.push(row);
+    if (this._logs.length > 40) this._logs.shift();
+    if (typeof window !== 'undefined') window.__netlog = this._logs;
+    console.warn('[net]', event, extra);
+    try {
+      if (typeof fetch === 'function') {
+        fetch(`${mountPrefix()}/netlog`, {
+          method: 'POST', keepalive: true, cache: 'no-store',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(row),
+        }).catch(() => {});
+      }
+    } catch (e) { /* page is already going away */ }
   }
   owns(what = 'sim') {
     if (this.authority === 'server') return what === 'server';
@@ -171,8 +199,8 @@ export class Net {
     this.sock = sock;
     sock.binaryType = 'arraybuffer';
     sock.onmessage = (ev) => this._onMessage(ev.data);
-    sock.onclose = () => this._onClose();
-    sock.onerror = () => { /* onclose always follows */ };
+    sock.onclose = (ev) => this._onClose(ev);
+    sock.onerror = () => { this._netlog('sock-error', { rs: sock.readyState }); };
     this.path = path || 'websocket';
     this._raw({ t: 'ping', d: performance.now() });
     this._pingT = setInterval(() => this._raw({ t: 'ping', d: performance.now() }), 5000);
@@ -183,7 +211,7 @@ export class Net {
     // One session owns both JSON and binary — opening this beside a WebSocket gave every tab two
     // seats and two hello ids.
     if (typeof WebTransport === 'undefined' || typeof location === 'undefined' || location.protocol !== 'https:') return null;
-    const wt = new WebTransport(`${location.protocol}//${location.host}/wt`);
+    const wt = new WebTransport(`${location.protocol}//${location.host}${mountPrefix()}/wt`);
     const ready = wt.ready.then(() => true, () => false);
     const ok = await Promise.race([ready, new Promise((r) => setTimeout(() => r(false), 1500))]);
     if (!ok) { try { wt.close(); } catch (e) { /* ignore */ } return null; }
@@ -223,7 +251,7 @@ export class Net {
           sock.onclose = () => { clearTimeout(timer); reject(new Error('could not reach the server')); };
         });
         return;
-      } catch (e) { wsErr = e; }
+      } catch (e) { wsErr = e; this._netlog('ws-open-fail', { why: e.message }); }
       try {
         const wt = await this._openWebTransport();
         if (wt) {
@@ -235,7 +263,11 @@ export class Net {
     })().finally(() => { this._opening = null; });
     return this._opening;
   }
-  _onClose() {
+  _onClose(ev) {
+    this._netlog('sock-close', {
+      close: ev && ev.code, why: ev && ev.reason, clean: ev && ev.wasClean,
+      rs: ev && ev.target && ev.target.readyState, resuming: this.resuming,
+    });
     this.sock = null; clearInterval(this._pingT); this._pingT = null;
     for (const [, w] of this._waits) w.reject(new Error('lost the connection to the server'));
     this._waits.clear();
@@ -255,22 +287,25 @@ export class Net {
   async _retry(n) {
     if (!this.resuming) return;
     if (n >= RETRY_MS.length) { this._giveUp('lost the connection to the server'); return; }
+    const seat = this._resumeSeat;
+    this._netlog('retry', { n, wait: RETRY_MS[n], seat: seat && seat.id, room: seat && seat.code });
     await new Promise((r) => setTimeout(r, RETRY_MS[n]));
     if (!this.resuming) return;
-    const seat = this._resumeSeat;
-    try { await this._ensure(); } catch (e) { this._retry(n + 1); return; }
+    try { await this._ensure(); } catch (e) { this._netlog('retry-open-fail', { n, why: e.message }); this._retry(n + 1); return; }
     if (!this.resuming) return;
     try {
       const res = await this._request({ t: 'resume', id: seat.id, token: seat.token }, 'resume', 6000);
+      this._netlog('retry-resume-ok', { n, host: res.hostId });
       this._back(res, res.hostId === (res.id || this.id));
       return;
-    } catch (e) { /* the seat is gone; get back in the ordinary way */ }
+    } catch (e) { this._netlog('retry-resume-fail', { n, why: e.message }); }
     if (!this.resuming) return;
     if (!seat.code) { this._giveUp('lost the connection to the server'); return; }
     try {
       const res = await this._request({ t: 'join', code: seat.code, name: this._hostName, meta: { ...this._meta, prev: seat.id } }, 'join');
+      this._netlog('retry-join-ok', { n, host: res.hostId });
       this._back(res, res.hostId === (res.id || this.id));
-    } catch (e) { this._retry(n + 1); }
+    } catch (e) { this._netlog('retry-join-fail', { n, why: e.message }); this._retry(n + 1); }
   }
   _back(res, isHost) {
     const oldHost = this.hostId, wasHost = this.isHost;
@@ -280,6 +315,7 @@ export class Net {
     if (this.onStall) this.onStall(false, res);
   }
   _giveUp(msg) {
+    this._netlog('give-up', { why: msg });
     this.resuming = false; this._resumeSeat = null;
     if (this.onStall) this.onStall(false);
     this.connected = false; this.conns.clear();
@@ -334,7 +370,7 @@ export class Net {
     this.stats.recv++;
     switch (m.t) {
       case 'hello':
-        if (m.wire !== WIRE) { this._close(); this._giveUp(WIRE_STALE); break; }
+        if (m.wire !== WIRE) { this._netlog('wire-stale', { got: m.wire, want: WIRE }); this._close(); this._giveUp(WIRE_STALE); break; }
         this.id = m.id; if (m.token) this.token = m.token; if (m.max) this.maxPlayers = m.max;
         if (m.battlefieldMax) this.battlefieldMax = m.battlefieldMax;
         if (m.path && this.path === 'offline') this.path = m.path;
@@ -377,10 +413,12 @@ export class Net {
         break;
       }
       case 'closed':
+        this._netlog('server-closed', { why: m.reason || '' });
         this.connected = false; this.conns.clear();
         if (this.onDisconnect) this.onDisconnect(m.reason || '');
         break;
       case 'm': this._emit(m.tt, m.d, m.from); break;
+      case 'chat': this._emit('chat', m, m.from); break;
       // the server times our round trip itself so it knows how far to rewind the world when it
       // judges a shot; all this end has to do is answer, echoing its clock back untouched
       case 'ping': this._raw({ t: 'pong', d: m.d }); break;
@@ -474,6 +512,12 @@ export class Net {
     if (!this.connected) return;
     this.stats.sent++;
     this._raw({ t: 'm', tt: type, d: data, to: pid });
+  }
+  // Room-routed so team chat cannot leak through the host. The sender paints its own line.
+  chat(text, scope = 'all') {
+    if (!this.connected) return;
+    this.stats.sent++;
+    this._raw({ t: 'chat', text, scope: scope === 'team' ? 'team' : 'all' });
   }
   // A shot we believe landed. This is a claim, not damage: the server rewinds the target to where
   // it was on our screen and decides. It used to be `sendTo(id, 'pdmg')`, which the other end

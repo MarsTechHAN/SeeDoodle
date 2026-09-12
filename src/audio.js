@@ -239,6 +239,7 @@ class Sfx {
   smash(pos, big = false) { this.noise({ dur: big ? 0.28 : 0.14, gain: big ? 0.7 : 0.45, type: 'lowpass', freq: big ? 900 : 1600, freqEnd: 200, pos }); this.noise({ dur: 0.05, gain: 0.35, type: 'highpass', freq: 3500, pos }); this.tone({ freq: big ? 120 : 220, freqEnd: 60, dur: 0.12, gain: 0.25, type: 'triangle', pos }); }
   glass(pos) { this.noise({ dur: 0.16, gain: 0.42, type: 'highpass', freq: 2800, pos }); this.noise({ dur: 0.1, gain: 0.28, type: 'bandpass', freq: 4200, freqEnd: 900, pos }); this.tone({ freq: 1400, freqEnd: 420, dur: 0.09, gain: 0.12, type: 'triangle', pos }); }
   button(pos) { this.tone({ freq: 880, freqEnd: 720, dur: 0.06, gain: 0.12, type: 'square', pos }); }
+  chat() { this.tone({ freq: 980, freqEnd: 720, dur: 0.05, gain: 0.07, type: 'sine' }); }
   liftDing(pos) { this.tone({ freq: 660, dur: 0.09, gain: 0.16, type: 'sine', pos }); this.tone({ freq: 880, dur: 0.16, gain: 0.14, type: 'sine', pos, delay: 0.08 }); }
   liftHum(pos) { this.tone({ freq: 90, freqEnd: 70, dur: 0.18, gain: 0.06, type: 'triangle', pos }); }
   doorSlide(pos) { this.noise({ dur: 0.28, gain: 0.14, type: 'lowpass', freq: 900, freqEnd: 280, pos }); }

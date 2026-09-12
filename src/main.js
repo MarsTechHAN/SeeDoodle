@@ -97,7 +97,7 @@ const game = ctx.game = {
   addScore(pts, label) { const mult = 1 + Math.min(this.combo, 9) * 0.25; const p = Math.round(pts * mult); this.score += p; if (label) hud.kill(label, p); hud.setScore(this.score, this.combo); },
   onPlayerDeath() { endFocus(); onLocalDeath(); },
 };
-input.captureScore = () => (game.state === 'play' || game.state === 'dying') && !game.menu && !hud.el.screen.classList.contains('show');
+input.captureScore = () => (game.state === 'play' || game.state === 'dying') && !game.menu && !hud.el.screen.classList.contains('show') && !hud.chatOpen;
 // 'ffa' is players against each other; 'coop' is the whole lobby against the waves.
 const online = () => game.mode !== 'solo';
 const teamMode = () => isTeamMode(game.mode);
@@ -1096,6 +1096,12 @@ net.on('cut', () => { if (player.grapple.state !== 'idle') { player.detachGrappl
 net.on('score', (rows) => { if (!net.isHost) applyScores(rows); });
 net.on('fell', (d, from) => { if (!net.isHost) return; const sc = scores.get(from); if (sc) { sc.kills = Math.max(0, sc.kills - 1); sendScores(); net.send('feed', { text: sc.name + ' fell off the page · -1' }); hud.kill(t`${sc.name} fell off the page · -1`, 0); } });
 net.on('feed', (d) => hud.kill(String(d.text || ''), 0));
+net.on('chat', (d, from) => {
+  const id = d.from || from;
+  const name = lobby.players.get(id)?.name || d.name || ts('someone');
+  hud.pushChat({ name, text: String(d.text || ''), scope: d.scope === 'team' ? 'team' : 'all', color: playerColorCSS(displayedColor(lobby.players.get(id))), me: id === net.id });
+  if (id !== net.id) audio.chat();
+});
 player.onFall = () => {
   if (!online() || !inMatch()) return;
   if (teamMode()) {
@@ -1120,7 +1126,12 @@ function idleUpdate(dt) {
   const canDrop = !net.isHost || !othersActive;
   if (idle > limit - IDLE_WARN && !idleWarned && canDrop) { idleWarned = true; hud.message('STILL THERE?', 'move or you get kicked for inactivity', 3); audio.empty(); }
   if (idle <= limit - IDLE_WARN) idleWarned = false;
-  if (idle > limit && canDrop) { const back = net.isHost ? null : String(net.aliasCode || net.code || '').replace(/-\d+$/, ''); leaveOnline(net.isHost ? 'lobby closed: everyone was idle' : 'kicked for inactivity'); lobby.rejoinCode = back; if (back) showStart(); return; }
+  if (idle > limit && canDrop) {
+    net._netlog('idle-kick', { idle, limit, host: net.isHost ? 1 : 0 });
+    const back = net.isHost ? null : String(net.aliasCode || net.code || '').replace(/-\d+$/, '');
+    leaveOnline(net.isHost ? 'lobby closed: everyone was idle' : 'kicked for inactivity');
+    lobby.rejoinCode = back; if (back) showStart(); return;
+  }
   // the host also clears out a client that has sat idle past the limit, in case its tab cannot do it itself
   if (net.isHost) for (const [id, r] of remote) if (r.idle && r.idleSince && performance.now() / 1000 - r.idleSince > limit - IDLE_FLAG + 15) { net.sendTo(id, 'kick', { reason: 'kicked for inactivity' }); const c = net.conns.get(id); setTimeout(() => { try { c && c.close(); } catch (e) { /* ignore */ } }, 500); }
 }
@@ -1174,6 +1185,7 @@ function leaveOnline(reason) {
   match.clear();
   player.cancelGrenade?.();
   localNadeAnnouncements.clear();
+  hud.setChatLive(false, false);
   net.leave(); for (const id of [...remote.keys()]) removeRemote(id); lobby.players.clear(); colorSeats.clear(); scores.clear(); hud.setBoard(null);
   player.applyWeaponMode('normal'); if (touch) touch.setWeaponMode('normal'); applySkin();
   if (game.state !== 'start') { game.state = 'start'; game.mode = 'solo'; setArena(false); resetGame(); hud.setGameplayVisible(false); }
@@ -1600,7 +1612,7 @@ function startMatch(late, spawnIdx, mode = 'ffa') {
 }
 function pause(at = performance.now()) { if ((game.state !== 'play' && !(game.state === 'dying' && online())) || game.menu) return; player.cancelGrenade(at); player.cancelKnife(); if (!online()) game.state = 'pause'; game.menu = true; showPause(); audio.reelLoop(false); }
 function resume() { if (online()) { player._resetGrenadeInput(); game.menu = false; if (game.state === 'dying' && game.respawnT <= 0) game.respawnArm = input.lastActive; hud.hideScreen(); hud.setGameplayVisible(true); if (!input.usingGamepad && !touchMode) input.requestLock(); return; } begin(); }
-Object.assign(window.__game, { match, addBot, fillBots, changeTeam, broadcastLobby, startWave, updateWaves, begin, beginAtWave, jumpToWave, resetGame, spawnPickup, updatePickups, updateArenaPickups, supplySpot, pickups, applyRules, applySkin, focusCandidate, enterFocus, pickSpawn, startMatch, createLobby, joinLobby, quickPlay, leaveOnline, hostStart });
+Object.assign(window.__game, { match, addBot, fillBots, changeTeam, broadcastLobby, startWave, updateWaves, begin, beginAtWave, jumpToWave, resetGame, spawnPickup, updatePickups, updateArenaPickups, supplySpot, pickups, applyRules, applySkin, focusCandidate, enterFocus, pickSpawn, startMatch, createLobby, joinLobby, quickPlay, leaveOnline, hostStart, openChat, closeChat });
 hud.onScreenClick = () => {
   // the config sits on top of whatever screen opened it, so anything that would have dismissed that
   // screen dismisses the config first - backdrop, space bar, escape
@@ -1612,8 +1624,34 @@ hud.onScreenClick = () => {
   if ((st === 'play' || st === 'dying') && game.menu) { resume(); return; }
   if (st === 'pause' || st === 'dead') resume();
 };
-canvas.addEventListener('click', () => { if (game.state === 'play' && !game.menu && !input.pointerLocked && !input.usingGamepad && !touchMode) input.requestLock(); });
-input.onLockChange = (locked) => { if (!locked && !touchMode && (game.state === 'play' || (game.state === 'dying' && online())) && !game.menu && !input.usingGamepad) pause(); };
+function chatAllowed() {
+  if (!net.active || cfgBack) return false;
+  if (game.state === 'lobby') return true;
+  if (game.menu || hud.el.screen.classList.contains('show')) return false;
+  return game.state === 'play' || game.state === 'dying';
+}
+function openChat() {
+  if (!chatAllowed() || hud.chatOpen) return;
+  hud.openChat();
+  if (!touchMode && !input.usingGamepad) input.exitLock();
+}
+function closeChat(relock) {
+  const was = hud.chatOpen;
+  hud.closeChat();
+  if (was && relock && (game.state === 'play' || game.state === 'dying') && !game.menu && !touchMode && !input.usingGamepad) input.requestLock();
+}
+hud.onChatOpen = () => openChat();
+hud.onChatClose = () => closeChat(true);
+hud.onChatSend = (text, scope) => {
+  hud.pushChat({ name: myName, text, scope, color: playerColorCSS(displayedColor(lobby.players.get(net.id))), me: true });
+  net.chat(text, scope);
+  closeChat(true);
+};
+canvas.addEventListener('click', () => {
+  if (hud.chatOpen) { closeChat(true); return; }
+  if (game.state === 'play' && !game.menu && !input.pointerLocked && !input.usingGamepad && !touchMode) input.requestLock();
+});
+input.onLockChange = (locked) => { if (!locked && !touchMode && (game.state === 'play' || (game.state === 'dying' && online())) && !game.menu && !input.usingGamepad && !hud.chatOpen) pause(); };
 input.onDeviceChange = (pad) => { hud.setDevice(pad); hud.setWeapon(player.weapon.name, player.weapon.hint); };
 window.addEventListener('pagehide', () => { if (net.active) net.leave(); });
 // browsers only let audio start on a gesture; any press wakes the context if it went to sleep
@@ -1636,7 +1674,9 @@ function step(now) {
   input.objectiveMode = game.mode === 'demolition'; input.update(dt);
   const st = game.state; const playing = st === 'play' || st === 'dying';
   // the config screen eats every key that would otherwise dismiss the screen underneath it
-  if (cfgBack) { if (input.pressed('jump') || input.pressed('confirm') || input.pressed('pause')) closeConfig(); }
+  if (hud.chatOpen && input.pressed('pause')) { input.consume('pause'); closeChat(true); }
+  else if (cfgBack) { if (input.pressed('jump') || input.pressed('confirm') || input.pressed('pause')) closeConfig(); }
+  else if (chatAllowed() && input.pressed('confirm') && !input.usingGamepad) { input.consume('confirm'); openChat(); }
   else if (st === 'start' || st === 'pause' || st === 'dead' || st === 'over') { if (input.pressed('jump') || input.pressed('confirm') || (st === 'pause' && input.pressed('pause'))) hud.onScreenClick(); }
   else if ((st === 'play' || (st === 'dying' && online())) && input.pressed('pause')) { if (game.menu) resume(); else { pause(input.holdTiming?.('pause')?.start ?? performance.now()); input.exitLock(); } }
   else if ((st === 'play' || st === 'dying') && game.menu && (input.pressed('jump') || input.pressed('confirm'))) resume();
@@ -1654,7 +1694,8 @@ function step(now) {
     else if (want && online()) { boardT += dt; if (boardT > 0.5) { boardT = 0; hud.setBoard(boardHTML()); } }
   } else { boardToggle = false; if (!hud.el.board.hidden) hud.setBoard(null); }
   boardTouchHeld = !!input.touchKeys.score;
-  if (st === 'play' && !game.menu && !input.pointerLocked && !input.usingGamepad && !touchMode) { lockTipT -= dt; if (lockTipT <= 0) { lockTipT = 2.5; hud.tip('click the page to grab the mouse', 2); } }
+  if (st === 'play' && !game.menu && !input.pointerLocked && !input.usingGamepad && !touchMode && !hud.chatOpen) { lockTipT -= dt; if (lockTipT <= 0) { lockTipT = 2.5; hud.tip('click the page to grab the mouse', 2); } }
+  hud.setChatLive(!!net.active, isTeamMode(lobby.gameMode));
   let scale = 1;
   if (game.hitstopT > 0) { game.hitstopT -= dt; scale = game.hitstopScale; }
   else if (game.focus.active) scale = FOCUS_SCALE;

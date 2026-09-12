@@ -105,9 +105,9 @@ class WSConn {
     // 'end' and nothing else: no 'close', no 'error'. Miss that and the connection sits here for
     // ever — the player keeps their slot, the room is never dropped, and if they were the host
     // nobody is ever promoted in their place.
-    socket.on('end', () => this._dead());
-    socket.on('error', () => this._dead());
-    socket.on('close', () => this._dead());
+    socket.on('end', () => { this.why = this.why || 'tcp-end'; this._dead(); });
+    socket.on('error', (e) => { this.why = this.why || ('tcp-error:' + (e.code || e.message || 'err')); this._dead(); });
+    socket.on('close', () => { this.why = this.why || 'tcp-close'; this._dead(); });
     socket.setNoDelay(true); // a 40ms Nagle delay on 20Hz position updates is very visible
   }
   _dead() {
@@ -207,6 +207,7 @@ class WSConn {
   }
   close() {
     if (this.closed) return;
+    this.why = this.why || 'server-close';
     if (this.flushT) { clearImmediate(this.flushT); this.flushT = null; }
     this._flush();                 // anything already queued goes out ahead of the close frame
     this.closed = true;
@@ -251,7 +252,7 @@ function makeRoom(code, host, { isPublic, name, map, max }) {
     code, codes: new Set([code]), hostId: host.id, isPublic: !!isPublic,
     members: new Map(), max: Number.isSafeInteger(max) ? Math.min(Math.max(2, max), HARD_MAX) : MAX_PLAYERS,
     inMatch: false, accepting: true, hostName: name || '', map: map || null,
-    mode: null, combat: null, actors: new Map(), bots: new Map(), lobbyBots: new Set(), evictedBots: new Set(), unshielded: new Map(), tank: null, tankShots: new Map(), tankShotSerial: 0, tankFireAt: 0,
+    mode: null, combat: null, actors: new Map(), bots: new Map(), lobbyBots: new Set(), evictedBots: new Set(), unshielded: new Map(), tank: null, tankShots: new Map(), tankShotSerial: 0, tankFireAt: 0, teams: new Map(),
   };
   rooms.set(code, room);
   return room;
@@ -281,6 +282,26 @@ function roomInfo(room) {
   };
 }
 const roster = (room) => [...room.members.values()].map((m) => ({ id: m.id, name: m.name }));
+
+// One line per drop, so "I ran and then I was kicked" can be matched to silent / wedge /
+// TCP hangup / a resume that missed the grace window. Grep the process log for `NET `.
+function netlog(event, extra) {
+  const bits = [];
+  for (const k of Object.keys(extra || {})) {
+    const v = extra[k];
+    if (v === undefined || v === null || v === '') continue;
+    bits.push(k + '=' + String(v).replace(/\s+/g, '_').slice(0, 80));
+  }
+  console.log('NET ' + event + (bits.length ? ' ' + bits.join(' ') : ''));
+}
+function seatOf(c) {
+  return {
+    id: c.id, name: c.name || '-', code: c.room?.code || '-',
+    host: c.room && c.room.hostId === c.id ? 1 : 0,
+    path: c.path, pending: c.ws && !c.ws.closed ? c.ws.pending : -1,
+    quiet: Date.now() - (c.seen || 0), why: c.ws?.why || '',
+  };
+}
 
 function leaveRoom(client, reason) {
   const room = client.room;
@@ -340,12 +361,15 @@ function stall(client) {
   const room = client.room;
   if (!room) { clients.delete(client.id); return; }
   client.gone = Date.now();
+  const grace = room.hostId === client.id ? HOST_GRACE_MS : GRACE_MS;
+  netlog('stall', { ...seatOf(client), grace });
   toRoom(room, { t: 'stall', id: client.id }, client.id);
   client.graceT = setTimeout(() => {
     if (!client.gone) return;
+    netlog('grace-over', seatOf(client));
     leaveRoom(client, 'connection lost');
     clients.delete(client.id);
-  }, room.hostId === client.id ? HOST_GRACE_MS : GRACE_MS);
+  }, grace);
   client.graceT.unref();
 }
 
@@ -357,11 +381,12 @@ function bind(ws, client) {
     try {
       if (typeof raw !== 'string') onBinary(client, raw);
       else onMessage(client, raw);
-    } catch (e) { console.error('message error:', e.message); }
+    } catch (e) { console.error('message error:', e.message, client.id); }
   };
   ws.onclose = () => {
     if (client.ws !== ws) return;   // a superseded socket of a seat somebody has already resumed
     if (client.gone) return;        // already quiet; the grace timer owns what happens next
+    netlog('sock-close', seatOf(client));
     if (client.room) { stall(client); return; }
     leaveRoom(client); clients.delete(client.id);
   };
@@ -435,7 +460,7 @@ function clearCombat(room) {
 function noteLobby(room, d) {
   if (!d || d.players === undefined) return true;
   if (!Array.isArray(d.players) || d.players.length > room.max) return deny('oversized lobby roster');
-  const ids = new Set(), bots = new Set(), rows = [];
+  const ids = new Set(), bots = new Set(), rows = [], teams = new Map();
   for (const row of d.players) {
     if (!row || typeof row.id !== 'string' || !row.id.length || row.id.length > 96 || ids.has(row.id)) return deny('malformed lobby roster');
     ids.add(row.id);
@@ -445,9 +470,10 @@ function noteLobby(room, d) {
       bots.add(row.id);
     }
     rows.push(row);
+    if (row.bot !== true) teams.set(row.id, row.team === 1 ? 1 : 0);
   }
   if (room.members.size + bots.size > room.max) return deny('too many participants');
-  room.lobbyBots = bots; d.players = rows;
+  room.lobbyBots = bots; room.teams = teams; d.players = rows;
   if (netsim) netsim.noteLobbyFields(room, d);
   // Two joins can beat the first host reply. Trim retired bots instead of dropping that reply:
   // it may be the only targeted start packet that the first joining player will receive.
@@ -915,6 +941,7 @@ function onMessage(client, raw) {
       const victim = room.members.get(m.id);
       if (!victim) break;
       send(victim, { t: 'closed', reason: m.reason || 'kicked' });
+      netlog('kick', { ...seatOf(victim), reason: m.reason || 'kicked', by: client.id });
       leaveRoom(victim, m.reason || 'kicked');
       break;
     }
@@ -923,13 +950,41 @@ function onMessage(client, raw) {
       leaveRoom(client);
       break;
 
+    // Chat is routed here, not through the host, so a team line cannot leak to the other side
+    // even if the host is compromised or the room is on battlefield authority.
+    case 'chat': {
+      if (!room) break;
+      if (typeof m.text !== 'string') break;
+      const text = m.text.replace(/[\u0000-\u001f\u007f]/g, '').replace(/\s+/g, ' ').trim().slice(0, 80);
+      if (!text) break;
+      const now = Date.now();
+      client.chatAt = (client.chatAt || []).filter((t) => now - t < 2000);
+      if (client.chatAt.length >= 4) break;
+      client.chatAt.push(now);
+      const scope = m.scope === 'team' ? 'team' : 'all';
+      const name = String(client.name || client.meta?.name || '').slice(0, 14) || 'doodle';
+      const out = JSON.stringify({ t: 'chat', from: client.id, name, scope, text });
+      const teamOnly = scope === 'team' && teamMode(room);
+      const myTeam = teamOnly ? (room.actors.get(client.id)?.team ?? room.teams.get(client.id) ?? 0) : null;
+      for (const p of room.members.values()) {
+        if (p.id === client.id || !p.ws || p.ws.closed) continue;
+        if (teamOnly && (room.actors.get(p.id)?.team ?? room.teams.get(p.id) ?? 0) !== myTeam) continue;
+        p.ws.send(out);
+      }
+      break;
+    }
+
     // A new socket claiming a seat that went quiet. The token was handed out over the seat's
     // original connection and is never relayed, so holding it is the proof of being the same
     // player - which matters, because the seat carries a score and possibly the host job.
     case 'resume': {
       const seat = clients.get(String(m.id || ''));
       const ok = seat && seat.gone && seat.room && seat.token && m.token === seat.token;
-      if (!ok) { send(client, { t: 'error', for: 'resume', message: 'that seat is gone' }); break; }
+      if (!ok) {
+        netlog('resume-fail', { from: client.id, want: m.id, have: !!seat, gone: !!(seat && seat.gone), room: !!(seat && seat.room) });
+        send(client, { t: 'error', for: 'resume', message: 'that seat is gone' }); break;
+      }
+      netlog('resume-ok', { id: seat.id, code: seat.room.code, from: client.id });
       clearTimeout(seat.graceT); seat.graceT = null; seat.gone = 0;
       clients.delete(client.id);          // this socket arrived as a stranger; it is not one
       const old = seat.ws;
@@ -959,6 +1014,7 @@ function onMessage(client, raw) {
       if (m.tt === 'ps' || m.tt === 'botps') {
         deny('json position feed');
         send(client, { t: 'closed', reason: WIRE_STALE });
+        netlog('wire-stale', seatOf(client));
         leaveRoom(client, 'wire');
         break;
       }
@@ -1072,6 +1128,27 @@ function onMessage(client, raw) {
 
 // ---------------------------------------------------------------- wiring
 const server = http.createServer((req, res) => {
+  // Same-origin beacon from a tab that just lost its socket. keepalive fetch can still
+  // land here after onclose, which is the only way we see the browser's close code.
+  if ((req.url || '').split('?')[0] === '/netlog' && req.method === 'POST') {
+    let raw = '';
+    req.on('data', (c) => { if (raw.length < 4000) raw += c; });
+    req.on('end', () => {
+      res.writeHead(204, { 'cache-control': 'no-store' }).end();
+      try {
+        const d = JSON.parse(raw);
+        if (!d || typeof d !== 'object') return;
+        netlog('client', {
+          event: String(d.event || '').slice(0, 40),
+          id: d.id, code: d.code, path: d.path,
+          close: d.close, why: d.reason || d.why, n: d.n,
+          auth: d.authority, match: d.inMatch,
+          ip: req.headers['x-real-ip'] || req.socket.remoteAddress,
+        });
+      } catch (e) { /* ignore junk */ }
+    });
+    return;
+  }
   if (req.url === '/lan/info') {
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-cache' });
     const inRooms = [...clients.values()].filter((c) => c.room);
@@ -1129,7 +1206,12 @@ setInterval(() => {
     pruneGrenades(c, now);
     if (c.gone) continue;   // no socket to close; the grace timer is already counting
     const quiet = now - c.seen;
-    if (quiet > SILENT_MS || (quiet > WEDGE_MS && c.ws.pending > WEDGE_BYTES)) c.ws.close();
+    if (quiet > SILENT_MS || (quiet > WEDGE_MS && c.ws.pending > WEDGE_BYTES)) {
+      const why = quiet > SILENT_MS ? 'silent' : 'wedge';
+      if (c.ws) c.ws.why = why;
+      netlog(why, seatOf(c));
+      c.ws.close();
+    }
   }
 }, 2000).unref();
 
