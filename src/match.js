@@ -6,8 +6,11 @@ import { encodeLocal } from './players.js';
 import { ArenaBots } from './arena-bots.js';
 import { ts } from './i18n.js';
 
-export const isTeamMode = (mode) => mode === 'tdm' || mode === 'demolition';
-export const modeOf = (mode) => ['ffa', 'coop', 'tdm', 'demolition'].includes(mode) ? mode : 'ffa';
+export const isTeamMode = (mode) => mode === 'tdm' || mode === 'demolition' || mode === 'battlefield';
+export const isBattlefield = (mode) => mode === 'battlefield';
+export const modeOf = (mode) => ['ffa', 'coop', 'tdm', 'demolition', 'battlefield'].includes(mode) ? mode : 'ffa';
+export const teamCap = (mode) => mode === 'battlefield' ? 64 : 16;
+export const roomCap = (mode) => mode === 'battlefield' ? 128 : 32;
 export const TEAM_COLORS = [0, 2];
 export const TEAM_NAMES = ['BLUE TEAM', 'ORANGE TEAM'];
 export const MATCH_RULES = { target: 50, time: 480000, respawn: 3000, protect: 2000, prepare: 3000, roundTime: 120000, plant: 5000, defuse: 7000, fuse: 40000, roundBreak: 4000, wins: 5, switchAfter: 4 };
@@ -36,7 +39,13 @@ export class TeamMatch {
     this.net.on('botps', (d, from) => {
       const a = this.actor(d.id);
       if (this.net.isHost || from !== this.net.hostId || !a?.bot || !a.alive || d.round !== this.state?.round || d.life !== a.life) return;
-      const r = this.remote.get(d.id); if (r) { r.push(d.ps, performance.now() / 1000); r.lastSeen = performance.now(); }
+      const r = this.remote.get(d.id); if (r) {
+        if (d.nearby) {
+          const yaw = r.snapB?.yaw ?? r.yaw;
+          r.push([d.ps[0], d.ps[1], d.ps[2], yaw, r.pitch, r.weaponIndex, (d.ps[6] || 0) & ~(8 | 32), r.hp, 0, 0, 0], performance.now() / 1000);
+        } else r.push(d.ps, performance.now() / 1000);
+        r.lastSeen = performance.now();
+      }
     });
   }
   active() { return isTeamMode(this.ctx.game.mode) && ['play', 'dying', 'over'].includes(this.ctx.game.state); }
@@ -91,7 +100,7 @@ export class TeamMatch {
     if (!s) return;
     if (this.appliedRound !== s.round) {
       this.appliedRound = s.round; this.restoreSpectator(); this.resetObjectiveInput(); this.clearRound?.(); P.clearNades(); this.ctx.bullets.clear(); this.intents.clear(); this.bots.clear?.();
-      this.ctx.hud.message(ts(s.mode === 'tdm' ? 'TEAM DEATHMATCH' : 'DEMOLITION'), s.mode === 'demolition' ? ts('ROUND {} - {}', s.round, ts(this.team(this.net.id) === s.attackTeam ? 'ATTACK' : 'DEFEND')) : ts('First to 50 - 8 minutes'), 2.5);
+      this.ctx.hud.message(ts(s.mode === 'demolition' ? 'DEMOLITION' : s.mode === 'battlefield' ? 'BATTLEFIELD' : 'TEAM DEATHMATCH'), s.mode === 'demolition' ? ts('ROUND {} - {}', s.round, ts(this.team(this.net.id) === s.attackTeam ? 'ATTACK' : 'DEFEND')) : ts('First to 50 - 8 minutes'), 2.5);
     }
     for (const a of s.actors) {
       const b = this.body(a.id); if (!b) continue;
@@ -101,7 +110,8 @@ export class TeamMatch {
         this.applied.set(a.id, a.life);
         if (a.id === this.net.id && a.alive) {
           this.restoreSpectator(); this.resetObjectiveInput(); this.ctx.hud.root.classList.remove('team-dead');
-          P.reset(vec(a.spawn), s.mode === 'tdm'); P.yaw = a.yaw; P.pitch = 0; P.hp = a.hp; P.maxHp = 110; P.lastHitBy = null; P.lastHit = null; game.state = 'play';
+          P.reset(vec(a.spawn), s.mode === 'tdm' || s.mode === 'battlefield'); P.yaw = a.yaw; P.pitch = 0; P.hp = a.hp; P.maxHp = 110; P.lastHitBy = null; P.lastHit = null; game.state = 'play';
+          if (this.net.authority === 'server') this.net.resetPrediction?.();
           P.regenRate = s.mode === 'demolition' ? 0 : P.regenRate;
           P._resetGrenadeInput();
         } else if (a.alive) {
@@ -127,7 +137,7 @@ export class TeamMatch {
     const p = this.lobby.players.get(id); if (!p) return;
     const a = { id, team: p.team, bot: !!p.bot, alive: false, hp: 0, life: 0, protectedUntil: 0, respawnAt: 0 };
     this.state.actors.push(a);
-    if (this.state.mode === 'tdm' && this.state.phase !== 'over') this.spawn(a);
+    if ((this.state.mode === 'tdm' || this.state.mode === 'battlefield') && this.state.phase !== 'over') this.spawn(a);
     else { const base = a.team === this.state.attackTeam ? 0 : 1; a.spawn = this.ctx.level.teamSpawns[base][0].toArray(); }
     this.publish(true);
   }
@@ -140,7 +150,7 @@ export class TeamMatch {
     a.alive = false; a.hp = 0; a.respawnAt = this.now() + MATCH_RULES.respawn; a.protectedUntil = 0;
     const b = this.body(id); if (b) b.alive = false;
     const v = this.scores.get(id); if (v) v.deaths++;
-    const k = this.actor(killer); if (k && k.id !== id && k.team !== a.team) { const score = this.scores.get(k.id); if (score) score.kills++; if (s.mode === 'tdm') s.points[k.team]++; }
+    const k = this.actor(killer); if (k && k.id !== id && k.team !== a.team) { const score = this.scores.get(k.id); if (score) score.kills++; if (s.mode === 'tdm' || s.mode === 'battlefield') s.points[k.team]++; }
     this.dropBomb(id); if (s.interaction?.id === id) s.interaction = null;
     this.sendScores(); this.publish(true); return true;
   }
@@ -217,16 +227,19 @@ export class TeamMatch {
   hostTick() {
     const s = this.state, now = this.now();
     const present = [0, 1].map((team) => s.actors.some((a) => a.team === team));
-    if (s.phase !== 'over' && (!present[0] || !present[1])) {
+    // Battlefield rooms fill over minutes and may start with one colour. Ending that
+    // after five seconds made a 1-player practice match unplayable, and it also
+    // blocked warmup → live so nobody could ever move.
+    if (s.phase !== 'over' && s.mode !== 'battlefield' && (!present[0] || !present[1])) {
       s.emptySince ||= now;
       if (now - s.emptySince >= 5000) { s.phase = 'over'; s.winner = present[0] ? 0 : present[1] ? 1 : null; this.publish(true); }
       return;
     }
     s.emptySince = 0;
-    if (s.phase === 'warmup') { if (now >= s.endsAt) { s.phase = 'live'; s.endsAt = now + (s.mode === 'tdm' ? MATCH_RULES.time : MATCH_RULES.roundTime); for (const a of s.actors) a.protectedUntil = now + (s.mode === 'tdm' ? MATCH_RULES.protect : 0); this.publish(true); } return; }
+    if (s.phase === 'warmup') { if (now >= s.endsAt) { s.phase = 'live'; s.endsAt = now + (s.mode === 'demolition' ? MATCH_RULES.roundTime : MATCH_RULES.time); for (const a of s.actors) a.protectedUntil = now + (s.mode === 'demolition' ? 0 : MATCH_RULES.protect); this.publish(true); } return; }
     if (s.phase === 'roundover') { if (now >= s.endsAt) this.nextRound(); return; }
     if (s.phase !== 'live') return;
-    if (s.mode === 'tdm') {
+    if (s.mode === 'tdm' || s.mode === 'battlefield') {
       let respawned = false;
       for (const a of s.actors) if (!a.alive && a.respawnAt && now >= a.respawnAt) { this.spawn(a); respawned = true; }
       if (Math.max(...s.points) >= MATCH_RULES.target || now >= s.endsAt) { s.phase = 'over'; s.winner = s.points[0] === s.points[1] ? null : s.points[0] > s.points[1] ? 0 : 1; this.publish(true); }
@@ -307,7 +320,7 @@ export class TeamMatch {
   renderHUD() {
     const s = this.state, now = this.now(), mine = this.actor(this.net.id), bomb = s.bomb, action = this.actionFor(this.net.id), interaction = s.interaction;
     const role = s.mode === 'demolition' ? ts('ROUND {}', s.round) + ' · ' + ts(mine?.team === s.attackTeam ? 'ATTACK' : 'DEFEND') : ts(TEAM_NAMES[mine?.team || 0]);
-    let hint = s.mode === 'tdm' ? ts('First to 50 - 8 minutes') : ts('Hold B to plant / defuse - N drops C4');
+    let hint = s.mode === 'demolition' ? ts('Hold B to plant / defuse - N drops C4') : ts('First to 50 - 8 minutes');
     if (s.mode === 'demolition') {
       if (bomb?.status === 'planted') hint = ts('BOMB PLANTED AT {}', bomb.site);
       else if (bomb?.carrier === this.net.id) hint = ts('You carry C4 - reach A or B');

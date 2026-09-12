@@ -1,5 +1,5 @@
 // Navigation grid auto-generated from the collision world (multi-level: one node per walkable surface per cell).
-import * as THREE from 'three';
+import * as THREE from '../vendor/three.module.js';
 
 const _min = new THREE.Vector3(), _max = new THREE.Vector3(), _q = [];
 const _rp = new THREE.Vector3(), _down = new THREE.Vector3(0, -1, 0);

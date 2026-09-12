@@ -40,15 +40,20 @@ control scheme, and `?lang=en` / `?lang=zh` pins the language. Persistent state 
 
 ```
 index.html      import map, one <canvas>, one <div id="hud">. That is the whole document.
-server.js       static files + rooms + WebSocket + server-side hit judging. Zero dependencies.
+server.js       static files + rooms + WebSocket + hit judging. Zero npm deps; WebTransport is optional.
 style.css       the HUD and every screen. The game world is not styled here - it is drawn.
 src/
   main.js       bootstrap, game loop, waves, lobbies, screens, pickups, scoring. The wiring.
   render.js     the look: scene -> (shade, inkId, normal) buffer -> a full-screen pen pass.
   level.js      map construction. Merged ink geometry + box colliders, one builder per map.
+                `buildCollision(world, key)` builds the same boxes with no scene (Node-safe).
+  ink.js        pen ids only. The server names surfaces without loading shaders.
   physics.js    axis-aligned box world, spatial hash, swept movement with step-up, raycasts.
   nav.js        navigation grid generated from the collision world, one node per walkable surface.
-  player.js     you: movement, grapple, camera feel, health, difficulty and mobility rules.
+  player.js     you: camera feel, health, weapons. Movement is `step()` from move.js.
+  move.js       pure `step(state, input, dt, world, rules)`. The server cannot load player.js.
+  pvs.js        baked 16 m sector visibility for interest management.
+  netsim.js     room-side AoI + the 30 Hz battlefield tick. The browser never loads this.
   weapons.js    view models and firing. One entry in GUNS per weapon, one class per behaviour.
   bullets.js    ballistic rounds, when the match is running drop and travel time.
   enemies.js    enemy types, AI, replication. One entry in TYPES per enemy.
@@ -58,10 +63,12 @@ src/
   hud.js        the DOM heads-up display.
   touch.js      the phone control scheme.
   input.js      keyboard, mouse and gamepad folded into one state map.
-  net.js        the client half of the transport.
+  net.js        the client half of the transport. `authority` is `'server'` in battlefield.
+  wire.js       binary `ps` / nearby / input / snapshot. Shared by the client and the room server.
   settings.js   every knob the config panel exposes, and the difficulty/mobility tables.
   i18n.js       language.
   util.js       shared maths.
+wt-listen.js    optional native WebTransport listener; skipped when the module or TLS is missing.
 vendor/         three.js, BufferGeometryUtils, the fonts.
 ```
 
@@ -88,26 +95,29 @@ If you retune, move the default.
 rung reproduces the old hardcoded behaviour exactly, and every rung above it only ever takes things
 away. Keep them monotonic: a player must never find that a harder setting gave them something back.
 
-## The server relays; it does not simulate
+## The server relays; battlefield is the exception
 
-`server.js` forwards room messages verbatim. It does not know the level, the enemies, or what a
-lobby field means. Two consequences you will run into:
+`server.js` still forwards host-auth rooms verbatim. It does not know the enemies or what a lobby
+field means. Two consequences you will run into:
 
 - **Adding a lobby setting does not touch `server.js`.** Follow the existing shape exactly — see
-  `lobby.diff` and `lobby.mob` in `main.js`: the host owns the value, it rides along in
+  `lobby.diff`, `lobby.mob` and `lobby.fall` in `main.js`: the host owns the value, it rides along in
   `broadcastLobby()`, in the late-join `start`, and in `hostStart()`'s `start`; clients read it in
   `net.on('lobby')` and `net.on('start')`. Miss one of those five places and it desyncs on join.
 - **Adding an enemy type does not touch `server.js`** either — the type is a string in `espawn`.
 
-The one thing the server *does* judge is damage between players. A client sends a claim; the server
-rewinds everyone's position by that client's own measured round trip and decides. It has no copy of
-the level, so it cannot know a wall was in the way — the check is plausibility, not truth. If you
-change a weapon's damage or rate of fire, update its `pvp` triple in `GUNS` or legitimate hits will
-start being refused.
+It now *does* know the collision world: `buildCollision` + a baked PVS filter every relayed `ps`,
+which is what stops the all-to-all feed and what withholds wallhack data. Damage between players is
+still a claim the server rewinds. On host-auth modes the rewind is a trail of reported positions
+(plausibility). On **battlefield** (`net.authority === 'server'`) the server steps `move.js` at 30 Hz
+and the rewind is its own history.
 
-Authority elsewhere is split and it is worth knowing which half you are in: the host owns enemy
-health, waves and pickups; enemy *projectiles* are replayed on every client so each applies its own
-hurt without waiting for a round trip.
+If you change a weapon's damage or rate of fire, update its `pvp` triple in `GUNS` or legitimate hits
+will start being refused.
+
+Authority elsewhere is split: the host owns enemy health, waves and pickups; enemy *projectiles* are
+replayed on every client so each applies its own hurt without waiting for a round trip. `net.isHost`
+is still that job. `net.owns('sim')` is false in battlefield because the room process owns movement.
 
 ## Verifying a change
 

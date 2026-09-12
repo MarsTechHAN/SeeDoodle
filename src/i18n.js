@@ -229,6 +229,7 @@ const DICT = {
     'opening a lobby…': '正在开房…',
     'connecting…': '连接中…',
     'no open lobbies · opening a public one for you…': '没有开放的房间 · 正在为你开一个公开房',
+    'reload — the wire format changed': '请刷新页面 — 联机协议已更新',
 
     // ---- lobby ----
     'LOBBY': '房间',
@@ -266,6 +267,10 @@ const DICT = {
     // ---- team matches ----
     'TEAM DEATHMATCH': '团队竞技',
     'DEMOLITION': '爆破模式',
+    'BATTLEFIELD': '战场',
+    'server simulates · 128 players · fog of war': '服务器演算 · 128 人 · 战争迷雾',
+    '64 per team · server moves you · nearby enemies stay hidden': '每队最多 64 人 · 服务器演算移动 · 墙后的敌人不会发给你',
+    '{} · {} ms': '{} · {} 毫秒',
     'BLUE TEAM': '蓝队',
     'ORANGE TEAM': '橙队',
     'two teams - shared score - respawn at your base': '两队对抗 · 击杀计入队伍分数 · 阵亡后在己方基地重生',
@@ -278,6 +283,7 @@ const DICT = {
     'REMOVE BOT': '移除人机',
     'SWITCH TEAM': '切换队伍',
     'Both teams need a player or bot': '两队都需要至少一名玩家或人机',
+    'you joined a match in progress': '你加入了一场进行中的对局',
     'Kills / deaths': '击杀 / 阵亡',
     'DOWN': '已阵亡',
     'DRAW': '平局',

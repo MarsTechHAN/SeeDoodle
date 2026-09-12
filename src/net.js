@@ -9,7 +9,10 @@
 // game code above it did not have to be rewritten: one host per room is still the authority, and
 // send/broadcast/sendTo still mean "to everyone", "to everyone but me", "to one player".
 
+import { WIRE, KIND, encodePs, encodeBotPs, encodeInput, decodePacket } from './wire.js';
+
 const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const WIRE_STALE = 'reload — the wire format changed';
 export const makeCode = () => Array.from({ length: 5 }, () => ALPHABET[Math.floor(Math.random() * ALPHABET.length)]).join('');
 
 const DEFAULT_PORT = 8080;
@@ -28,6 +31,91 @@ function serverURL() {
   return `ws://localhost:${DEFAULT_PORT}/ws`;
 }
 
+function concatU8(a, b) {
+  const out = new Uint8Array(a.length + b.length);
+  out.set(a, 0); out.set(b, a.length);
+  return out;
+}
+
+// Same framing as wt-listen.js: 4-byte length + payload on the control stream,
+// raw datagrams for droppable binary. Looks like a WebSocket to Net.
+async function wtSocket(wt) {
+  const ctl = await wt.createBidirectionalStream();
+  const ctlWriter = ctl.writable.getWriter();
+  let dgramWriter = null;
+  try { dgramWriter = wt.datagrams.writable.getWriter(); } catch (e) { dgramWriter = null; }
+  const sock = {
+    readyState: 1,
+    binaryType: 'arraybuffer',
+    onmessage: null,
+    onclose: null,
+    onerror: null,
+    path: (!dgramWriter || wt.reliability === 'reliable-only') ? 'webtransport-reliable' : 'webtransport',
+    send(data) {
+      if (typeof data === 'string') {
+        const bytes = new TextEncoder().encode(data);
+        const frame = new Uint8Array(4 + bytes.length);
+        new DataView(frame.buffer).setUint32(0, bytes.length, true);
+        frame.set(bytes, 4);
+        ctlWriter.write(frame).catch(() => sock.close());
+        return;
+      }
+      const u8 = data instanceof Uint8Array ? data : new Uint8Array(data);
+      if (dgramWriter && sock.path === 'webtransport') {
+        dgramWriter.write(u8).catch(() => { dgramWriter = null; sock.path = 'webtransport-reliable'; });
+        return;
+      }
+      const frame = new Uint8Array(4 + u8.length);
+      new DataView(frame.buffer).setUint32(0, u8.length, true);
+      frame.set(u8, 4);
+      ctlWriter.write(frame).catch(() => sock.close());
+    },
+    close() {
+      if (sock.readyState === 3) return;
+      sock.readyState = 3;
+      try { wt.close(); } catch (e) { /* already gone */ }
+      if (sock.onclose) sock.onclose();
+    },
+  };
+  const emit = (payload, binary) => {
+    if (!sock.onmessage) return;
+    sock.onmessage({ data: binary ? payload : new TextDecoder().decode(payload) });
+  };
+  const pumpCtl = async () => {
+    const reader = ctl.readable.getReader();
+    let buf = new Uint8Array(0);
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf = concatU8(buf, value instanceof Uint8Array ? value : new Uint8Array(value));
+        while (buf.length >= 4) {
+          const n = new DataView(buf.buffer, buf.byteOffset, buf.byteLength).getUint32(0, true);
+          if (buf.length < 4 + n) break;
+          const payload = buf.subarray(4, 4 + n);
+          buf = buf.subarray(4 + n);
+          emit(payload, payload.length > 0 && payload[0] === 0xD1);
+        }
+      }
+    } catch (e) { /* closed */ }
+    sock.close();
+  };
+  pumpCtl();
+  if (dgramWriter) {
+    (async () => {
+      try {
+        const reader = wt.datagrams.readable.getReader();
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          if (value) emit(value.buffer ? value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength) : value, true);
+        }
+      } catch (e) { /* closed */ }
+    })();
+  }
+  return sock;
+}
+
 export class Net {
   constructor() {
     this.sock = null; this.url = null; this.conns = new Map(); this.isHost = false;
@@ -40,7 +128,17 @@ export class Net {
     this._waits = new Map(); this._waitSeq = 0; this._pingT = null; this.rtt = 0;
     this.token = null; this.resuming = false; this._resumeSeat = null; this._meta = {}; this.pings = {};
     this._serverOffset = Date.now() - performance.now(); this._serverLast = 0; this._clockReady = false; this._clockSamples = [];
+    // 'local' in solo, a peer id while a host owns the room, 'server' in battlefield.
+    this.authority = null; this.path = 'offline'; this.battlefieldMax = 128;
+    this._seq = 0; this._ack = 0; this._ackBits = 0; this._pred = []; this._inTick = 0;
+    this._wt = null; this._wtWrite = null;
   }
+  owns(what = 'sim') {
+    if (this.authority === 'server') return what === 'server';
+    if (!this.connected) return true;
+    return this.isHost;
+  }
+  resetPrediction() { this._pred.length = 0; this._inTick = 0; }
   // A fuse must keep running across frame stalls, sleep and wall-clock adjustments. Server time
   // gives every peer the same deadline; performance.now keeps local countdowns monotonic.
   serverNow() { return this._serverLast = Math.max(this._serverLast, performance.now() + this._serverOffset); }
@@ -68,10 +166,36 @@ export class Net {
 
   // ---- transport ----
   _raw(obj) { const s = this.sock; if (s && s.readyState === 1) s.send(JSON.stringify(obj)); }
+  _bin(buf) { const s = this.sock; if (s && s.readyState === 1) s.send(buf); }
+  _live(sock, path) {
+    this.sock = sock;
+    sock.binaryType = 'arraybuffer';
+    sock.onmessage = (ev) => this._onMessage(ev.data);
+    sock.onclose = () => this._onClose();
+    sock.onerror = () => { /* onclose always follows */ };
+    this.path = path || 'websocket';
+    this._raw({ t: 'ping', d: performance.now() });
+    this._pingT = setInterval(() => this._raw({ t: 'ping', d: performance.now() }), 5000);
+    if (this._hostName) this._raw({ t: 'name', name: this._hostName });
+  }
+  async _openWebTransport() {
+    // HTTPS-only, and the server has to be listening. A LAN `http://` page stays on WebSocket.
+    // One session owns both JSON and binary — opening this beside a WebSocket gave every tab two
+    // seats and two hello ids.
+    if (typeof WebTransport === 'undefined' || typeof location === 'undefined' || location.protocol !== 'https:') return null;
+    const wt = new WebTransport(`${location.protocol}//${location.host}/wt`);
+    const ready = wt.ready.then(() => true, () => false);
+    const ok = await Promise.race([ready, new Promise((r) => setTimeout(() => r(false), 1500))]);
+    if (!ok) { try { wt.close(); } catch (e) { /* ignore */ } return null; }
+    const sock = await wtSocket(wt);
+    this._wt = wt;
+    return sock;
+  }
   _close() {
     clearInterval(this._pingT); this._pingT = null;
+    if (this._wt) { try { this._wt.close(); } catch (e) { /* already gone */ } this._wt = null; this._wtWrite = null; }
     const s = this.sock; this.sock = null;
-    if (s) { s.onopen = s.onmessage = s.onerror = s.onclose = null; try { s.close(); } catch (e) { /* already gone */ } }
+    if (s && s.readyState === 1) { try { s.close(); } catch (e) { /* ignore */ } }
     for (const [, w] of this._waits) w.reject(new Error('disconnected from the server'));
     this._waits.clear();
   }
@@ -80,25 +204,27 @@ export class Net {
     if (this._opening) return this._opening;
     if (!this.url) this.url = serverURL();
     this._close();
-    this._opening = new Promise((resolve, reject) => {
-      let sock;
-      try { sock = new WebSocket(this.url); } catch (e) { reject(new Error('the server is not reachable')); return; }
-      const timer = setTimeout(() => { try { sock.close(); } catch (e) { /* ignore */ } reject(new Error('the server did not answer')); }, OPEN_TIMEOUT);
-      sock.onopen = () => {
-        clearTimeout(timer); this.sock = sock;
-        sock.onmessage = (ev) => this._onMessage(ev.data);
-        sock.onclose = () => this._onClose();
-        sock.onerror = () => { /* onclose always follows */ };
-        // These pings synchronise fuse deadlines and keep the socket alive. Hit judging still
-        // measures round trips independently from the server's side.
-        this._raw({ t: 'ping', d: performance.now() });
-        this._pingT = setInterval(() => this._raw({ t: 'ping', d: performance.now() }), 5000);
-        if (this._hostName) this._raw({ t: 'name', name: this._hostName });
-        resolve();
-      };
-      sock.onerror = () => { clearTimeout(timer); reject(new Error('could not reach the server')); };
-      sock.onclose = () => { clearTimeout(timer); reject(new Error('could not reach the server')); };
-    }).finally(() => { this._opening = null; });
+    this._opening = (async () => {
+      try {
+        const wt = await this._openWebTransport();
+        if (wt) {
+          this._live(wt, wt.path);
+          return;
+        }
+      } catch (e) { /* fall through to WebSocket */ }
+      await new Promise((resolve, reject) => {
+        let sock;
+        try { sock = new WebSocket(this.url); } catch (e) { reject(new Error('the server is not reachable')); return; }
+        const timer = setTimeout(() => { try { sock.close(); } catch (e) { /* ignore */ } reject(new Error('the server did not answer')); }, OPEN_TIMEOUT);
+        sock.onopen = () => {
+          clearTimeout(timer);
+          this._live(sock, 'websocket');
+          resolve();
+        };
+        sock.onerror = () => { clearTimeout(timer); reject(new Error('could not reach the server')); };
+        sock.onclose = () => { clearTimeout(timer); reject(new Error('could not reach the server')); };
+      });
+    })().finally(() => { this._opening = null; });
     return this._opening;
   }
   _onClose() {
@@ -174,12 +300,37 @@ export class Net {
     return false;
   }
 
+  _noteAck(seq) {
+    if (!Number.isInteger(seq)) return;
+    const delta = (seq - this._ack + 65536) % 65536;
+    if (delta === 0 || delta > 32) { if (seq !== this._ack) { this._ack = seq; this._ackBits = 0; } return; }
+    this._ackBits = ((this._ackBits << delta) | (1 << (delta - 1))) >>> 0;
+    this._ack = seq;
+  }
+  _onBinary(raw) {
+    const msg = decodePacket(raw);
+    if (!msg) return;
+    this.stats.recv++;
+    if (msg.seq != null) this._noteAck(msg.seq);
+    if (msg.kind === KIND.PS) this._emit('ps', msg.d, msg.from);
+    else if (msg.kind === KIND.BOTPS) this._emit('botps', { id: msg.id, ps: msg.ps, round: msg.round, life: msg.life, nearby: !!msg.nearby }, msg.from);
+    else if (msg.kind === KIND.NEARBY) {
+      if (msg.id && msg.id !== msg.from) this._emit('botps', { id: msg.id, ps: msg.d, nearby: true }, msg.from);
+      else this._emit('nearby', msg.d, msg.from);
+    } else if (msg.kind === KIND.SNAP) this._emit('snap', msg, msg.from);
+  }
   _onMessage(raw) {
+    if (typeof raw !== 'string') { this._onBinary(raw); return; }
     let m; try { m = JSON.parse(raw); } catch (e) { return; }
     if (!m || typeof m !== 'object') return;
     this.stats.recv++;
     switch (m.t) {
-      case 'hello': this.id = m.id; if (m.token) this.token = m.token; if (m.max) this.maxPlayers = m.max; this._syncClock(m.now); break;
+      case 'hello':
+        if (m.wire !== WIRE) { this._close(); this._giveUp(WIRE_STALE); break; }
+        this.id = m.id; if (m.token) this.token = m.token; if (m.max) this.maxPlayers = m.max;
+        if (m.battlefieldMax) this.battlefieldMax = m.battlefieldMax;
+        if (m.path && this.path === 'offline') this.path = m.path;
+        this._syncClock(m.now); break;
       case 'created': this._settle('create', null, m); break;
       case 'joined': this._settle('join', null, m) || this._settle('quick', null, m); break;
       case 'resumed': this._settle('resume', null, m); break;
@@ -291,6 +442,7 @@ export class Net {
     if (this.sock && this.sock.readyState === 1 && this.connected) this._raw({ t: 'leave' });
     this.connected = false; this.isHost = false; this.conns.clear();
     this.code = null; this.hostId = null; this.aliasCode = null; this._inMatch = false;
+    this.authority = null; this.resetPrediction();
   }
   disconnect() { this.leave(); this._close(); }
 
@@ -299,7 +451,15 @@ export class Net {
   send(type, data, relay = false) {
     if (!this.connected) return;
     this.stats.sent++;
+    if (type === 'ps') { this._bin(encodePs(data)); return; }
+    if (type === 'botps') { this._bin(encodeBotPs(data)); return; }
     this._raw({ t: 'm', tt: type, d: data, relay: !!relay });
+  }
+  sendInput(frames, firstTick) {
+    if (!this.connected) return;
+    this.stats.sent++;
+    this._seq = (this._seq + 1) & 0xffff;
+    this._bin(encodeInput(frames, firstTick, this._seq, this._ack, this._ackBits));
   }
   broadcast(type, data) { this.send(type, data, true); }
   sendTo(pid, type, data) {

@@ -4,9 +4,10 @@
 // and hits between players are judged by the server with the latency rewound out of them.
 import * as THREE from 'three';
 import { InkRenderer, INK, makeInkMaterial } from './render.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { World } from './physics.js';
 import { Input } from './input.js';
-import { buildLevel, LEVELS } from './level.js';
+import { buildLevel, bindLevelDraw, LEVELS } from './level.js';
 import { NavGrid } from './nav.js';
 import { Effects } from './effects.js';
 import { EnemyManager, BOSSES, buildHumanoid, disposeModelGeometry } from './enemies.js';
@@ -14,13 +15,16 @@ import { Player } from './player.js';
 import { Bullets } from './bullets.js';
 import { RemotePlayer, encodeLocal, PLAYER_CAPACITY, validPlayerColor, playerInk, playerColorCSS } from './players.js';
 import { Net } from './net.js';
-import { TeamMatch, isTeamMode, modeOf, TEAM_COLORS, TEAM_NAMES } from './match.js';
+import { TeamMatch, isTeamMode, isBattlefield, modeOf, TEAM_COLORS, TEAM_NAMES, teamCap, roomCap } from './match.js';
+import { step as stepMove, packInputFrame, STEP_DT } from './move.js';
 import { HUD, CONTROLS_HTML } from './hud.js';
 import { isTouchDevice, TouchControls, TOUCH_CONTROLS_HTML } from './touch.js';
 import { t, ts, trDom, getLang, setLang, LANGS } from './i18n.js';
 import { audio } from './audio.js';
 import { SETTINGS, DIFFICULTY, MOBILITY, WEAPON_MODES, SKINS, APPEARANCE_OPTIONS, diffOf, mobOf, weaponModeOf, skinOf, appearanceOf, loadSettings, saveSettings } from './settings.js';
 import { rand, choose, clamp } from './util.js';
+
+bindLevelDraw({ makeInkMaterial, mergeGeometries, buildHumanoid });
 
 const canvas = document.getElementById('c');
 const R = new InkRenderer(canvas);
@@ -101,6 +105,14 @@ const player = ctx.player = new Player(ctx);
 const bullets = ctx.bullets = new Bullets(ctx);
 player.name = myName;
 const net = new Net();
+player.onAuthStep = (moveIn) => {
+  if (net.authority !== 'server' || !net.connected) return;
+  const tick = net._inTick = (net._inTick + 1) & 0xffff;
+  const bits = packInputFrame({ ...moveIn, yaw: player.yaw, pitch: player.pitch, fireDown: player.firing, slot: player.weaponIndex });
+  net._pred.push({ tick, input: { ...moveIn, yaw: player.yaw, pitch: player.pitch }, bits });
+  if (net._pred.length > 10) net._pred.shift();
+  net.sendInput(net._pred.map((p) => p.bits), net._pred[0].tick);
+};
 const remote = new Map();      // peer id -> RemotePlayer
 ctx.grenadeNow = () => net.serverNow?.() ?? Date.now();
 ctx.localPlayerId = () => net.id || 'local';
@@ -642,7 +654,7 @@ function pingCell(id) {
 function boardHTML(title = null) {
   const rows = sortedScores(); const code = String(net.aliasCode || net.code || '').replace(/-\d+$/, '');
   const line = (id, s, tail) => `<div class="${id === net.id ? 'me' : ''}">${playerNameHTML(id, s.name, true)}<span class="tail">${tail}</span>${pingCell(id)}</div>`;
-  if (teamMode()) return `<h3>${ts(game.mode === 'tdm' ? 'TEAM DEATHMATCH' : 'DEMOLITION')}</h3>${[0, 1].map((team) => `<h4 class="team-${team}">${ts(TEAM_NAMES[team])} ${match.state?.points[team] || 0}</h4>${rows.filter(([id]) => lobby.players.get(id)?.team === team).map(([id, s]) => line(id, s, `${s.kills} / ${s.deaths}${lobby.players.get(id)?.bot ? ' BOT' : ''}${match.actor(id)?.alive === false ? ' - ' + ts('DOWN') : ''}`)).join('')}`).join('')}<div class="foot">${ts('Kills / deaths')} · ${code}</div>`;
+  if (teamMode()) return `<h3>${ts(game.mode === 'demolition' ? 'DEMOLITION' : game.mode === 'battlefield' ? 'BATTLEFIELD' : 'TEAM DEATHMATCH')}</h3>${[0, 1].map((team) => `<h4 class="team-${team}">${ts(TEAM_NAMES[team])} ${match.state?.points[team] || 0}</h4>${rows.filter(([id]) => lobby.players.get(id)?.team === team).map(([id, s]) => line(id, s, `${s.kills} / ${s.deaths}${lobby.players.get(id)?.bot ? ' BOT' : ''}${match.actor(id)?.alive === false ? ' - ' + ts('DOWN') : ''}`)).join('')}`).join('')}<div class="foot">${ts('Kills / deaths')} · ${code}</div>`;
   if (coop()) {
     return `<h3>${ts(title || 'SQUAD SURVIVAL')}</h3>${rows.map(([id, s]) => line(id, s, t`${s.kills} kills · ${s.deaths} downs`)).join('')}<div class="foot">${t`wave ${game.wave} · ${game.score} points · ${enemies.alive + game.queue.length} left · lobby ${code}`}</div>`;
   }
@@ -716,17 +728,17 @@ function applyTeams() {
   for (const [id, p] of lobby.players) { const color = displayedColor(p); if (id === net.id) { player.team = p.team ?? 0; player.ink = playerInk(color); } else { const r = addRemote(id, p.name, color, p.appearance); r.team = p.team ?? 0; r.bot = !!p.bot; } }
   applySkin();
 }
-function balanceTeams() { const n = [0, 0]; for (const p of lobby.players.values()) { if (![0, 1].includes(p.team) || n[p.team] >= 16) p.team = n[0] <= n[1] ? 0 : 1; n[p.team]++; } applyTeams(); }
+function balanceTeams() { const cap = teamCap(lobby.gameMode); const n = [0, 0]; for (const p of lobby.players.values()) { if (![0, 1].includes(p.team) || n[p.team] >= cap) p.team = n[0] <= n[1] ? 0 : 1; n[p.team]++; } applyTeams(); }
 function addBot(team = assignTeam(), batch = false) {
-  if (!net.isHost || game.state !== 'lobby' || !isTeamMode(lobby.gameMode) || ![0, 1].includes(team) || lobby.players.size >= net.maxPlayers || [...lobby.players.values()].filter((p) => p.team === team).length >= 16) return;
+  if (!net.isHost || game.state !== 'lobby' || isBattlefield(lobby.gameMode) || !isTeamMode(lobby.gameMode) || ![0, 1].includes(team) || lobby.players.size >= net.maxPlayers || [...lobby.players.values()].filter((p) => p.team === team).length >= teamCap(lobby.gameMode)) return;
   const seq = (lobby.botSeq || 0) + 1; lobby.botSeq = seq; const id = 'bot:' + net.id + ':' + seq;
   const genders = ['male', 'female', 'neutral'], tones = [0, 1, 2, 3, 4, 5], hair = ['short', 'bob', 'curly', 'ponytail', 'crop', 'bald'];
   lobby.players.set(id, { name: 'BOT ' + seq, color: assignPlayerColor(id), team, bot: true, appearance: appearanceOf({ gender: genders[seq % genders.length], tone: tones[seq % tones.length], hair: hair[seq % hair.length] }) }); if (!batch) { applyTeams(); broadcastLobby(); }
 }
-function fillBots() { if (!net.isHost || game.state !== 'lobby' || !isTeamMode(lobby.gameMode)) return; while (lobby.players.size < net.maxPlayers) { const before = lobby.players.size; addBot(assignTeam(), true); if (lobby.players.size === before) break; } applyTeams(); broadcastLobby(); }
+function fillBots() { if (!net.isHost || game.state !== 'lobby' || isBattlefield(lobby.gameMode) || !isTeamMode(lobby.gameMode)) return; while (lobby.players.size < net.maxPlayers) { const before = lobby.players.size; addBot(assignTeam(), true); if (lobby.players.size === before) break; } applyTeams(); broadcastLobby(); }
 function changeTeam(id, team) {
   if (!net.isHost || game.state !== 'lobby' || !isTeamMode(lobby.gameMode) || ![0, 1].includes(team)) return;
-  const p = lobby.players.get(id); if (!p || [...lobby.players.values()].filter((p) => p.team === team).length >= 16) return; p.team = team; applyTeams(); broadcastLobby();
+  const p = lobby.players.get(id); if (!p || [...lobby.players.values()].filter((p) => p.team === team).length >= teamCap(lobby.gameMode)) return; p.team = team; applyTeams(); broadcastLobby();
 }
 net.on('teamreq', (d, from) => changeTeam(from, d.team));
 function reservedColors() { for (const [id, seat] of colorSeats) if (seat.until <= Date.now()) colorSeats.delete(id); return [...colorSeats.entries()].map(([id, seat]) => ({ id, ...seat })); }
@@ -757,7 +769,18 @@ function applyLobbyPlayers(rows, reservations) {
   const mine = lobby.players.get(net.id);
   if (!net.isHost && mine && JSON.stringify(mine.appearance) !== JSON.stringify(myAppearance)) net.send('appearance', myAppearance);
 }
-function broadcastLobby() { net.send('lobby', { players: lobbyRows(), colors: reservedColors(), hostId: net.id, isPublic: lobby.isPublic, map: lobby.map || mapKey, mode: lobby.gameMode, bal: !!lobby.ballistics, fall: !!lobby.fall, diff: ctx.difficulty(), mob: lobby.mob, weaponMode: ctx.weaponMode(), skin: ctx.skin(), shown: net.aliasCode || net.code }); renderLobby(); }
+function syncRoomCap() {
+  net.maxPlayers = roomCap(lobby.gameMode);
+  if (isBattlefield(lobby.gameMode)) for (const [id, p] of [...lobby.players]) if (p.bot) removeRemote(id);
+}
+function applyAuthority() {
+  const server = isBattlefield(lobby.gameMode) && !!net.inMatch;
+  net.authority = server ? 'server' : null;
+  player._authFixed = server;
+  player._stepAcc = 0;
+  net.resetPrediction();
+}
+function broadcastLobby() { syncRoomCap(); net.send('lobby', { players: lobbyRows(), colors: reservedColors(), hostId: net.id, isPublic: lobby.isPublic, map: lobby.map || mapKey, mode: lobby.gameMode, bal: !!lobby.ballistics, fall: !!lobby.fall, diff: ctx.difficulty(), mob: lobby.mob, weaponMode: ctx.weaponMode(), skin: ctx.skin(), shown: net.aliasCode || net.code, max: net.maxPlayers }); renderLobby(); }
 const inMatch = () => ['play', 'dying', 'over'].includes(game.state);
 let boardT = 0;   // seconds since the open scoreboard was last redrawn
 net.onPeerLeave = (id) => { match.removeMember(id); const nm = (lobby.players.get(id) || {}).name; removeRemote(id); broadcastLobby(); if (inMatch()) { hud.kill(t`${nm || ts('someone')} left`, 0); sendScores(); } };
@@ -841,7 +864,7 @@ net.onPeerJoin = (from, meta) => {
 };
 net.on('lobby', (d, from) => {
   if (net.isHost || from !== net.hostId || !Array.isArray(d.players)) return;
-  lobby.hostId = d.hostId; lobby.isPublic = !!d.isPublic; lobby.code = net.code; lobby.shown = d.shown || net.code; if (d.map) lobby.map = knownMap(d.map); lobby.gameMode = modeOf(d.mode); lobby.ballistics = !!d.bal; if (d.fall !== undefined) lobby.fall = !!d.fall; if (d.mob) lobby.mob = d.mob; if (d.diff) lobby.diff = d.diff; lobby.weaponMode = weaponModeOf(d.weaponMode).key; lobby.skin = skinOf(d.skin).key; applyRules();
+  lobby.hostId = d.hostId; lobby.isPublic = !!d.isPublic; lobby.code = net.code; lobby.shown = d.shown || net.code; if (d.map) lobby.map = knownMap(d.map); lobby.gameMode = modeOf(d.mode); lobby.ballistics = !!d.bal; if (d.fall !== undefined) lobby.fall = !!d.fall; if (d.mob) lobby.mob = d.mob; if (d.diff) lobby.diff = d.diff; lobby.weaponMode = weaponModeOf(d.weaponMode).key; lobby.skin = skinOf(d.skin).key; if (d.max) net.maxPlayers = d.max; applyRules();
   applyLobbyPlayers(d.players, d.colors);
   if (inMatch()) { for (const p of d.players) if (!scores.has(p.id)) scores.set(p.id, { name: p.name, kills: 0, deaths: 0 }); refreshScoreHud(); }
   renderLobby();
@@ -929,7 +952,41 @@ net.on('backtolobby', () => { if (!net.isHost) toLobbyScreen(); });
 net.on('pickup', (d) => { if (!net.isHost) spawnPickup(d.kind, new THREE.Vector3().fromArray(d.pos), d.id); });
 net.on('taken', (d) => { const p = pickups.find((x) => x.id === d.id); if (p) removePickup(p); });
 net.on('take', (d) => { if (!net.isHost) return; const p = pickups.find((x) => x.id === d.id); if (p) { removePickup(p); net.send('taken', { id: d.id }); } });
-net.on('ps', (d, from) => { const r = remote.get(from); if (r) { if (teamMode()) { if (d[14] !== match.state?.round || d[15] !== match.actor(from)?.life) return; if (match.actor(from)?.alive === false) { d = [...d]; d[6] &= ~64; } } r.push(d, performance.now() / 1000); r.lastSeen = performance.now(); } });
+function applyRemotePose(r, d, nearby) {
+  if (!r || !d) return;
+  if (nearby) {
+    const yaw = r.snapB?.yaw ?? r.yaw, pitch = r.snapB?.pitch ?? r.pitch;
+    const flags = ((d[6] || 0) & ~(8 | 32)) | (r.alive ? 64 : 0);
+    r.push([d[0], d[1], d[2], yaw, pitch, r.weaponIndex, flags, r.hp, 0, 0, 0], performance.now() / 1000);
+  } else r.push(d, performance.now() / 1000);
+  r.lastSeen = performance.now();
+}
+function reconcileLocal(d, tick) {
+  if (!d || !tick) return;
+  const err = Math.hypot(player.body.pos.x - d[0], player.body.pos.y - d[1], player.body.pos.z - d[2]);
+  net._pred = net._pred.filter((p) => {
+    const dlt = (p.tick - tick + 65536) & 0xffff;
+    return dlt > 0 && dlt < 32768;
+  });
+  if (err < 0.12) return;
+  player.body.pos.set(d[0], d[1], d[2]);
+  if (d.length > 10) player.body.vel.set(d[8], d[9], d[10]);
+  const rules = {
+    mob: player.mob, adsSpeed: player.opt.adsSpeed, bounds: level.bounds, fallY: level.fallY,
+    conveyors: level.conveyors, fallDamage: !!ctx.fallDamage?.(), maxSprint: player.maxSprint, diff: player.diff, rings: level.rings,
+  };
+  for (const p of net._pred) stepMove(player, p.input, STEP_DT, world, rules, { grapple: (gdt) => player._updateGrapple(gdt) });
+}
+net.on('ps', (d, from) => { const r = remote.get(from); if (r) { if (teamMode()) { if (d[14] !== match.state?.round || d[15] !== match.actor(from)?.life) return; if (match.actor(from)?.alive === false) { d = [...d]; d[6] &= ~64; } } applyRemotePose(r, d, false); } });
+net.on('nearby', (d, from) => { const r = remote.get(from); if (r) applyRemotePose(r, d, true); });
+net.on('snap', (msg) => {
+  if (!msg?.entities) return;
+  for (const e of msg.entities) {
+    if (e.id === net.id) { reconcileLocal(e.d, msg.tick); continue; }
+    const r = remote.get(e.id); if (r) applyRemotePose(r, e.d, !!e.nearby);
+  }
+  player._starve = !!msg.starve;
+});
 net.on('pdmg', (d) => {
   if (!player.alive || game.state !== 'play' || player.shieldT > 0 || (teamMode() && (d.round !== match.state?.round || d.life !== match.applied.get(net.id) || !match.canFight()))) return; player.lastHitBy = d.by || null; player.lastHit = { from: d.from || null, crit: !!d.crit, amount: d.amount, src: d.src };
   player.takeDamage(d.amount, d.from ? new THREE.Vector3().fromArray(d.from) : null);
@@ -1029,7 +1086,10 @@ function netUpdate(dt) {
     if (net.isHost) { const c = net.conns.get(id); if (c) { try { c.close(); } catch (e) { /* ignore */ } net.conns.delete(id); } net.send('leave', { id }); broadcastLobby(); sendScores(); }
   }
   hostQuiet = hostQuiet && !!remote.get(net.hostId) && performance.now() - (remote.get(net.hostId).lastSeen || 0) > 9000;
-  if (syncTick % 3 === 0 && inMatch()) net.send('ps', localSnapshot({ firing: player.firing, idle: input.idleSeconds > IDLE_FLAG }), true);
+  if (net.authority === 'server') {
+    if (hud.setNetPath) hud.setNetPath(net.path, net.rtt);
+  } else if (syncTick % 3 === 0 && inMatch()) net.send('ps', localSnapshot({ firing: player.firing, idle: input.idleSeconds > IDLE_FLAG }), true);
+  if (net.active && hud.setNetPath && syncTick % 15 === 0) hud.setNetPath(net.path, net.rtt);
   if (shotQueue.length) net.broadcast('shots', { k: player.weapon.kind, e: shotQueue.splice(0) });
   if (bulletQueue.length) net.broadcast('shots', { k: player.weapon.kind, mv: player.weapon.mv || 330, b: bulletQueue.splice(0) });
   if (teamMode()) { match.update(dt); return; }
@@ -1061,7 +1121,7 @@ function leaveOnline(reason) {
   net.leave(); for (const id of [...remote.keys()]) removeRemote(id); lobby.players.clear(); colorSeats.clear(); scores.clear(); hud.setBoard(null);
   player.applyWeaponMode('normal'); if (touch) touch.setWeaponMode('normal'); applySkin();
   if (game.state !== 'start') { game.state = 'start'; game.mode = 'solo'; setArena(false); resetGame(); hud.setGameplayVisible(false); }
-  game.menu = false; lobby.status = reason || ''; screen = 'online'; showStart();
+  game.menu = false; lobby.status = reason ? ts(reason) : ''; screen = 'online'; showStart();
 }
 async function createLobby(isPublic) {
   setStatus('opening a lobby…');
@@ -1149,6 +1209,7 @@ function configHTML() {
     <div class="cfgcol"><div class="cfghead">GAME</div>
       ${cfgCheck('setMus', musicWanted, 'music', '(M)')}
       ${cfgCheck('setBal', settings.ballistics, 'bullet drop &amp; travel time', '(solo · in a lobby the host decides)')}
+      ${cfgCheck('setFall', settings.fallDamage, 'fall damage', '(solo · in a lobby the host decides)')}
       <label class="cfgrow seg"><span class="cfgname">difficulty<i>${ts('how fast you heal and how long your legs last')} · ${ts('(solo · in a lobby the host decides)')}</i></span><span class="langsel" id="setDiff">${Object.entries(DIFFICULTY).map(([k, d]) => `<button type="button" class="langbtn${k === settings.difficulty ? ' on' : ''}" data-diff="${k}" title="${ts(d.blurb)}">${ts(d.name)}</button>`).join('')}</span></label>
       <div class="cfgnote" id="diffNote">${ts(diffOf(settings.difficulty).blurb)}</div>
       <label class="cfgrow lang"><span class="cfgname">language</span><span class="langsel" id="setLang">${Object.entries(LANGS).map(([k, n]) => `<button type="button" class="langbtn${k === getLang() ? ' on' : ''}" data-lang="${k}">${n}</button>`).join('')}</span></label>
@@ -1170,6 +1231,7 @@ function wireConfig() {
   p.querySelector('#setGrenadeAutoPin').addEventListener('change', (e) => { player.cancelGrenade(); settings.grenadeAutoPin = e.target.checked; applySettings(); });
   p.querySelector('#setMus').addEventListener('change', (e) => { musicWanted = e.target.checked; localStorage.setItem('doodle_music', musicWanted ? '1' : '0'); audio.musicOn(musicWanted); });
   p.querySelector('#setBal').addEventListener('change', (e) => { settings.ballistics = e.target.checked; applySettings(); });
+  p.querySelector('#setFall').addEventListener('change', (e) => { settings.fallDamage = e.target.checked; applySettings(); });
   p.querySelector('#setDiff').addEventListener('click', (e) => {
     const b = e.target.closest('.langbtn'); if (!b) return;
     settings.difficulty = b.dataset.diff; applySettings();
@@ -1285,6 +1347,7 @@ function modeHTML(sel, canPick) {
   const modes = [
     { key: 'tdm', name: 'TEAM DEATHMATCH', blurb: 'two teams - shared score - respawn at your base' },
     { key: 'demolition', name: 'DEMOLITION', blurb: 'plant at A or B - defuse C4 - one life per round' },
+    { key: 'battlefield', name: 'BATTLEFIELD', blurb: 'server simulates · 128 players · fog of war' },
     { key: 'ffa', name: 'FREE FOR ALL', blurb: t`everyone against everyone · first to ${FFA_TARGET}` },
     { key: 'coop', name: 'SQUAD SURVIVAL', blurb: 'all of you against the waves · bigger the squad, bigger the waves' },
   ];
@@ -1317,7 +1380,7 @@ function weaponModeHTML(selected, canPick) {
 }
 function lobbyHTML() {
   const rows = lobbyRows(); const host = net.isHost; const n = rows.length; const isCoop = lobby.gameMode === 'coop';
-  const blurb = isTeamMode(lobby.gameMode) ? ts(lobby.gameMode === 'tdm' ? 'TEAM DEATHMATCH' : 'DEMOLITION') : isCoop ? ts('squad survival · you against the page') : t`free for all · first to ${FFA_TARGET}`;
+  const blurb = lobby.gameMode === 'battlefield' ? ts('BATTLEFIELD') : isTeamMode(lobby.gameMode) ? ts(lobby.gameMode === 'tdm' ? 'TEAM DEATHMATCH' : 'DEMOLITION') : isCoop ? ts('squad survival · you against the page') : t`free for all · first to ${FFA_TARGET}`;
   return `<h1>LOBBY</h1><h2>${t`${blurb} · ${n}/${net.maxPlayers} players`}</h2>
     <div class="online" id="online">
       <div class="row"><span>code</span><span class="code">${String(net.isHost ? (net.aliasCode || net.code) : (lobby.shown || net.code) || '').replace(/-\d+$/, '')}</span></div>
@@ -1331,8 +1394,8 @@ function lobbyHTML() {
       ${diffHTML(ctx.difficulty(), host)}
       ${isCoop ? '' : mobHTML(lobby.mob || 'mid', host)}
       <div class="hint">${lobby.isPublic ? 'this lobby is public: anyone can quick play in, or type the code' : 'private lobby: friends type this code under PLAY ONLINE → JOIN'}</div>
-      ${isTeamMode(lobby.gameMode) ? `<div class="team-lobby">${[0, 1].map((team) => `<section class="team-${team}"><h3>${ts(TEAM_NAMES[team])} <small>${rows.filter((p) => p.team === team).length}/16</small></h3>${rows.filter((p) => p.team === team).map((p) => `<div class="team-seat">${playerNameHTML(p.id, p.name, true)}${p.bot ? `<small>BOT</small>${host ? `<button data-removebot="${esc(p.id)}" aria-label="${ts('REMOVE BOT')}">×</button>` : ''}` : p.id === lobby.hostId ? `<small>${ts('HOST')}</small>` : ''}${host || p.id === net.id ? `<button data-teamplayer="${esc(p.id)}" data-team="${1 - team}" title="${ts('SWITCH TEAM')}">↔</button>` : ''}</div>`).join('')}${host ? `<button data-addbot="${team}" ${n >= net.maxPlayers || rows.filter((p) => p.team === team).length >= 16 ? 'disabled' : ''}>${ts('ADD BOT')}</button>` : ''}</section>`).join('')}</div><div class="hint">${ts(lobby.gameMode === 'tdm' ? '50 team kills / 8 minutes - 3s respawn - friendly fire off' : 'First to 5 rounds - sides switch after round 4 - plant 5s / defuse 7s / C4 40s')}</div>` : `<div class="plist">${rows.map((p) => `<div class="${p.id === lobby.hostId ? 'host' : ''}${p.id === net.id ? ' me' : ''}">${playerNameHTML(p.id, p.name)}<span>${p.id === net.id ? 'you' : ''}</span></div>`).join('')}</div>`}
-      ${host && isTeamMode(lobby.gameMode) ? `<div class="row"><button id="fillBotsBtn" ${n >= net.maxPlayers ? 'disabled' : ''}>${ts('FILL TO 32 WITH BOTS')}</button></div>` : ''}
+      ${isTeamMode(lobby.gameMode) ? `<div class="team-lobby">${[0, 1].map((team) => `<section class="team-${team}"><h3>${ts(TEAM_NAMES[team])} <small>${rows.filter((p) => p.team === team).length}/${teamCap(lobby.gameMode)}</small></h3>${rows.filter((p) => p.team === team).map((p) => `<div class="team-seat">${playerNameHTML(p.id, p.name, true)}${p.bot ? `<small>BOT</small>${host ? `<button data-removebot="${esc(p.id)}" aria-label="${ts('REMOVE BOT')}">×</button>` : ''}` : p.id === lobby.hostId ? `<small>${ts('HOST')}</small>` : ''}${host || p.id === net.id ? `<button data-teamplayer="${esc(p.id)}" data-team="${1 - team}" title="${ts('SWITCH TEAM')}">↔</button>` : ''}</div>`).join('')}${host && !isBattlefield(lobby.gameMode) ? `<button data-addbot="${team}" ${n >= net.maxPlayers || rows.filter((p) => p.team === team).length >= teamCap(lobby.gameMode) ? 'disabled' : ''}>${ts('ADD BOT')}</button>` : ''}</section>`).join('')}</div><div class="hint">${ts(lobby.gameMode === 'demolition' ? 'First to 5 rounds - sides switch after round 4 - plant 5s / defuse 7s / C4 40s' : lobby.gameMode === 'battlefield' ? '64 per team · server moves you · nearby enemies stay hidden' : '50 team kills / 8 minutes - 3s respawn - friendly fire off')}</div>` : `<div class="plist">${rows.map((p) => `<div class="${p.id === lobby.hostId ? 'host' : ''}${p.id === net.id ? ' me' : ''}">${playerNameHTML(p.id, p.name)}<span>${p.id === net.id ? 'you' : ''}</span></div>`).join('')}</div>`}
+      ${host && isTeamMode(lobby.gameMode) && !isBattlefield(lobby.gameMode) ? `<div class="row"><button id="fillBotsBtn" ${n >= net.maxPlayers ? 'disabled' : ''}>${ts('FILL TO 32 WITH BOTS')}</button></div>` : ''}
       <div class="row"><button type="button" class="big" id="startBtn">START MATCH</button><button type="button" class="alt" id="leaveBtn">LEAVE</button></div>
       <div class="status" id="status">${esc(lobby.status || '')}</div><div class="hint">${(() => { const tail = n < 2 ? ts('people can still join once it is running') : t`${n} players in`; return host ? t`anyone can start · ${tail}` : t`anyone can start · only the host picks the mode and map · ${tail}`; })()}</div>
     </div>`;
@@ -1393,13 +1456,13 @@ function showStart() {
 function showPause() {
   redraw = showPause; cfgBack = null;
   if (online()) {
-    hud.showScreen(`<h1>MENU</h1><h2>${teamMode() ? ts(game.mode === 'tdm' ? 'TEAM DEATHMATCH' : 'DEMOLITION') : coop() ? ts('SQUAD SURVIVAL') : ts('FREE FOR ALL')} · ${String(net.aliasCode || net.code || '').replace(/-\d+$/, '')}</h2><div class="scoreboard">${sortedScores().map(([id, s]) => `<div class="${id === net.id ? 'me' : ''}">${playerNameHTML(id, s.name)}<span>${t`${s.kills} K · ${s.deaths} D`}</span></div>`).join('')}</div>${CONTROLS_HTML}${settingsHTML()}<div class="online" id="online"><div class="row"><button type="button" class="alt" id="leaveBtn">LEAVE MATCH</button></div></div><div class="go">${goText(ts('KEEP PLAYING'))}</div>`);
+    hud.showScreen(`<h1>MENU</h1><h2>${teamMode() ? ts(game.mode === 'demolition' ? 'DEMOLITION' : game.mode === 'battlefield' ? 'BATTLEFIELD' : 'TEAM DEATHMATCH') : coop() ? ts('SQUAD SURVIVAL') : ts('FREE FOR ALL')} · ${String(net.aliasCode || net.code || '').replace(/-\d+$/, '')}</h2><div class="scoreboard">${sortedScores().map(([id, s]) => `<div class="${id === net.id ? 'me' : ''}">${playerNameHTML(id, s.name)}<span>${t`${s.kills} K · ${s.deaths} D`}</span></div>`).join('')}</div>${CONTROLS_HTML}${settingsHTML()}<div class="online" id="online"><div class="row"><button type="button" class="alt" id="leaveBtn">LEAVE MATCH</button></div></div><div class="go">${goText(ts('KEEP PLAYING'))}</div>`);
     wireSettings(); wireOnline(); return;
   }
   hud.showScreen(`<h1>PAUSED</h1><h2>${t`wave ${game.wave} · score ${game.score}`}</h2>${CONTROLS_HTML}${settingsHTML()}${menuBtnHTML()}<div class="go">${goText(ts('RESUME'))}</div>`);
   wireSettings(); wireMenuBtn();
 }
-function showClickToPlay() { redraw = showClickToPlay; cfgBack = null; hud.showScreen(`<h1>MATCH ON</h1><h2>${teamMode() ? ts(game.mode === 'tdm' ? 'TEAM DEATHMATCH' : 'DEMOLITION') : coop() ? ts('SQUAD SURVIVAL') : t`free for all · first to ${FFA_TARGET}`}</h2><div class="go">${goText(ts('PLAY'))}</div>`); }
+function showClickToPlay() { redraw = showClickToPlay; cfgBack = null; hud.showScreen(`<h1>MATCH ON</h1><h2>${teamMode() ? ts(game.mode === 'demolition' ? 'DEMOLITION' : game.mode === 'battlefield' ? 'BATTLEFIELD' : 'TEAM DEATHMATCH') : coop() ? ts('SQUAD SURVIVAL') : t`free for all · first to ${FFA_TARGET}`}</h2><div class="go">${goText(ts('PLAY'))}</div>`); }
 function showDead() {
   redraw = showDead; cfgBack = null; hud.setGameplayVisible(false); const nb = game.score > best; if (nb) { best = game.score; localStorage.setItem('doodle_best', String(best)); }
   const endTail = nb ? ts(' · <b>NEW BEST</b>') : t` · best ${best}`;
@@ -1409,7 +1472,7 @@ function showDead() {
 function menuBtnHTML() { return '<div class="online menubtn"><div class="row"><button type="button" class="alt" id="menuBtn">MAIN MENU</button></div></div>'; }
 function wireMenuBtn() { const b = hud.el.panel.querySelector('#menuBtn'); if (b) b.addEventListener('click', (e) => { e.stopPropagation(); toMainMenu(); }); }
 function toMainMenu() { game.state = 'start'; game.mode = 'solo'; game.menu = false; setArena(false); resetGame(); audio.reelLoop(false); input.exitLock(); hud.setGameplayVisible(false); screen = 'main'; showStart(); }
-function toLobbyScreen() { match.clear(); net.inMatch = false; for (const r of remote.values()) r.lastSeen = performance.now(); setArena(true); resetGame(); game.state = 'lobby'; game.over = null; game.menu = false; hud.setGameplayVisible(false); hud.setBoard(null); screen = 'lobby'; showStart(); }
+function toLobbyScreen() { match.clear(); net.inMatch = false; applyAuthority(); for (const r of remote.values()) r.lastSeen = performance.now(); setArena(true); resetGame(); game.state = 'lobby'; game.over = null; game.menu = false; hud.setGameplayVisible(false); hud.setBoard(null); screen = 'lobby'; showStart(); }
 
 // ---------------- run control ----------------
 function resetGame() {
@@ -1433,7 +1496,7 @@ function beginAtWave(n) { game.mode = 'solo'; setArena(false); beginCommon(); re
 function jumpToWave(n) { enemies.clear(); effects.clear(); bullets.clear(); enemies.mods.speed = 1; enemies.mods.damage = 1; endFocus(); game.intermission = 0; game.queue = []; startWave(n); hud.hideScreen(); hud.setGameplayVisible(true); game.state = 'play'; game.menu = false; audio.reelLoop(false); }
 function hostStart() {
   if (!net.isHost || game.state !== 'lobby') return;
-  if (isTeamMode(lobby.gameMode) && [0, 1].some((team) => ![...lobby.players.values()].some((p) => p.team === team))) { setStatus('Both teams need a player or bot'); return; }
+  if (isTeamMode(lobby.gameMode) && !isBattlefield(lobby.gameMode) && [0, 1].some((team) => ![...lobby.players.values()].some((p) => p.team === team))) { setStatus('Both teams need a player or bot'); return; }
   scores.clear(); for (const [id, p] of lobby.players) scores.set(id, { name: p.name, kills: 0, deaths: 0 });
   const mode = modeOf(lobby.gameMode); lobby.map = matchMap(lobby.map || mapKey, mode);
   // deal everyone a different spot, shuffled so the same people do not always start together
@@ -1444,7 +1507,7 @@ function hostStart() {
 }
 function startMatch(late, spawnIdx, mode = 'ffa') {
   const isCoop = mode === 'coop';
-  match.clear(); net.inMatch = true; game.mode = modeOf(mode); lobby.gameMode = game.mode; setArena(!isCoop); resetGame(); matchLeft = FFA_TIME; clockT = 0; game.clockStarted = false;
+  match.clear(); net.inMatch = true; game.mode = modeOf(mode); lobby.gameMode = game.mode; applyAuthority(); setArena(!isCoop); resetGame(); matchLeft = FFA_TIME; clockT = 0; game.clockStarted = false;
   // the host owns the waves; everyone else renders the enemies it sends
   enemies.mirror = isCoop && !net.isHost; enemies.nextId = 1;
   // nobody sends snapshots in the lobby, so the silence clock restarts here or the sweep would drop everyone
@@ -1455,6 +1518,7 @@ function startMatch(late, spawnIdx, mode = 'ffa') {
   if (teamMode()) { player.regenRate = mode === 'demolition' ? 0 : player.regenRate; if (late) { player.alive = false; game.state = 'dying'; } applyTeams(); }
   else if (isCoop) hud.message('SQUAD SURVIVAL', late ? 'you joined a run in progress' : teamSize() + ' of you against the page · they come harder in a crowd', 3);
   else hud.message('FREE FOR ALL', late ? 'you joined a match in progress' : 'first to ' + FFA_TARGET + ' · ' + Math.round(FFA_TIME / 60) + ' minutes · everyone is fair game', 3);
+  if (isBattlefield(mode)) hud.message('BATTLEFIELD', late ? 'you joined a match in progress' : ts('server simulates · 128 players · fog of war'), 3);
   const rule = weaponModeOf(ctx.weaponMode());
   const mapTip = touchMode || input.usingGamepad ? t`tap <b>${hud.key('score')}</b> for map and scores` : t`hold <b>${hud.key('score')}</b> for map and scores`;
   hud.tip(rule.key === 'normal' ? mapTip : `${ts(rule.name)} · ${ts(rule.blurb)}`, 5);

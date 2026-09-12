@@ -16,7 +16,7 @@ const HIT = [['head', 0.3], ['torso', 0.33], ['hips', 0.2], ['armL', 0.11], ['ar
 
 // Seat identity survives colour reuse in larger rooms. The host deals 32 stable slots; the
 // ten-colour renderer palette repeats without renumbering anybody already in the room.
-export const PLAYER_CAPACITY = 32;
+export const PLAYER_CAPACITY = 128;
 export const PLAYER_INKS = [INK.BLUE, INK.GREEN, INK.ORANGE, INK.PINK, INK.TEAL, INK.VIOLET, INK.BROWN, INK.RED, INK.BLACK, INK.OLIVE];
 export const validPlayerColor = (slot) => Number.isInteger(slot) && slot >= 0 && slot < PLAYER_CAPACITY;
 export const playerInk = (slot) => PLAYER_INKS[validPlayerColor(slot) ? slot % PLAYER_INKS.length : 0];
@@ -190,7 +190,10 @@ export class RemotePlayer {
     if (this.snapB) {
       const A = this.snapA || this.snapB; const span = Math.max(0.02, this.snapB.t - A.t); const tt = now - 0.08; const k = clamp((tt - A.t) / span, 0, 1);
       _v.lerpVectors(A.p, this.snapB.p, k);
-      const late = tt - this.snapB.t; if (late > 0) _v.addScaledVector(this.vel, Math.min(late, 0.35));
+      const late = tt - this.snapB.t;
+      // A gap longer than ~300 ms is a lost snapshot, not jitter: freeze rather than
+      // slide the figure through a wall and snap it back when the next one arrives.
+      if (late > 0 && late < 0.3) _v.addScaledVector(this.vel, Math.min(late, 0.35));
       if (_v.distanceToSquared(this.body.pos) > 36) this.body.pos.copy(_v); else this.body.pos.lerp(_v, 1 - Math.exp(-dt * 22));
       this.body.vel.copy(this.vel);
       this.yaw = angleLerp(A.yaw, this.snapB.yaw, k); this.pitch = A.pitch + (this.snapB.pitch - A.pitch) * k;

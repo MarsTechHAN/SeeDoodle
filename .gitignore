@@ -7,6 +7,9 @@ _tiny.html
 node_modules/
 package-lock.json
 
+# Baked sector PVS. Recomputed from the collision world on first use of a map.
+pvs/
+
 *.log
 .DS_Store
 .env

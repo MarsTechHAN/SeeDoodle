@@ -10,6 +10,7 @@ import { clamp, damp, rand, Spring, alignYAxis } from './util.js';
 import { audio } from './audio.js';
 import { OPT_DEFAULTS, diffOf, mobOf, MOB_FULL, weaponModeOf } from './settings.js';
 import { ts } from './i18n.js';
+import { step, STEP_DT } from './move.js';
 
 const G = 26, WALK = 6.6, SPRINT = 10.6, CROUCH = 3.6, ACCEL = 140, FRICTION = 8, AIR_ACCEL = 36, AIR_CAP = 7.5, JUMP = 9.6;
 const STAND_H = 1.75, CROUCH_H = 1.05, EYE_STAND = 1.6, EYE_CROUCH = 0.88;
@@ -243,128 +244,82 @@ export class Player {
       this._updateCamera(dt); this.weapon.animate(dt, this._weaponState(false, false, 0));
       return;
     }
-    // ---- movement input ----
-    const mv = inp.move; this._mv = mv;
-    const wish = _v.set(0, 0, 0).addScaledVector(_fwd, mv.y).addScaledVector(_right, mv.x); let wishLen = wish.length(); if (wishLen > 1e-4) wish.divideScalar(wishLen); wishLen = Math.min(1, wishLen);
-    if (inp.usingGamepad) { if (inp.pressed('sprint')) this.sprintToggle = !this.sprintToggle; if (mv.y < 0.1) this.sprintToggle = false; } else this.sprintToggle = inp.down('sprint');
-    const aiming = this._aiming = inp.down('aim') && this.weapon.isGun;
-    const hspeed = Math.hypot(b.vel.x, b.vel.z);
-    const crouchDown = inp.down('crouch');
-    if (inp.pressed('crouch') && b.onGround && hspeed > 6.3 && !this.sliding && this.mob.slide) this._startSlide(hspeed);
-    if (this.sliding) { this.slideT += dt; if (!crouchDown || hspeed < 3.5 || this.airT > 0.35) this.sliding = false; }
-    let wantCrouch = (crouchDown && b.onGround) || this.sliding;
-    if (!wantCrouch && this.crouching) { b.height = STAND_H; if (ctx.world.overlapsBody(b)) wantCrouch = true; }
-    this.crouching = wantCrouch; b.height = this.crouching ? CROUCH_H : STAND_H;
-    const sprinting = this._sprinting = this.sprintToggle && mv.y > 0.1 && !this.crouching && !aiming && !this.sprintLock;
-    // Coming out of a run the gun has to come back up before it will go off. A fifth of a second is
-    // short enough to read as weight rather than as a trigger that ignored you - and it is the thing
-    // that stops a deathmatch being decided by who sprinted around the corner first.
-    this.sprintFireLock = sprinting ? 0.2 : Math.max(0, this.sprintFireLock - dt);
-    // Aiming has never actually slowed you down here, so 100% - the top of the slider - is the old
-    // behaviour. Only the ground-accel branch reads maxSpeed, so a slide keeps its momentum either way.
-    // `mob.speed` is 1 outside versus, so this reads exactly as it always did in solo and co-op.
-    const maxSpeed = (this.crouching && !this.sliding ? CROUCH : sprinting ? SPRINT : WALK) * (aiming ? opt.adsSpeed / 100 : 1) * this.mob.speed;
-    this.landGraceT -= dt; this.dashCd -= dt; this.blockCd -= dt;
-    // ---- ground / air accel ----
-    if (b.onGround) {
-      this.coyote = 0.13; this.airT = 0; this.airJumps = 1;
-      if (this.sliding) {
-        const sp = hspeed; if (sp > 0) { const ns = Math.max(0, sp - 6.5 * dt) / sp; b.vel.x *= ns; b.vel.z *= ns; }
-        if (wishLen > 0) { b.vel.x += wish.x * 6 * dt; b.vel.z += wish.z * 6 * dt; const n2 = Math.hypot(b.vel.x, b.vel.z); if (n2 > sp && n2 > 0) { b.vel.x *= sp / n2; b.vel.z *= sp / n2; } }
-      } else {
-        const fr = FRICTION * (this.landGraceT > 0 ? 0.25 : 1);
-        const sp = hspeed; if (sp > 0) { const ns = Math.max(0, sp - sp * fr * dt) / sp; b.vel.x *= ns; b.vel.z *= ns; }
-        if (wishLen > 0) { const cur = b.vel.x * wish.x + b.vel.z * wish.z; const add = Math.min(maxSpeed * wishLen - cur, ACCEL * dt); if (add > 0) { b.vel.x += wish.x * add; b.vel.z += wish.z * add; } }
+    // The kinematic half lives in move.js so a Node battlefield can run the same numbers.
+    // Audio, camera and weapons stay here; feeding MOB_FULL (solo / squad) is a no-op.
+    this.blockCd -= dt;
+    const aiming = inp.down('aim') && this.weapon.isGun;
+    if (this._authFixed) {
+      const L = this._latch || (this._latch = {});
+      if (inp.pressed('jump')) L.jump = true;
+      if (inp.pressed('crouch')) L.crouch = true;
+      if (inp.pressed('dash')) L.dash = true;
+      if (inp.pressed('sprint')) L.sprint = true;
+      if (inp.pressed('grapple')) L.grapple = true;
+    }
+    const latch = this._authFixed ? this._latch : null;
+    const moveIn = {
+      moveX: inp.move.x, moveY: inp.move.y,
+      jumpPressed: !!(inp.pressed('jump') || latch?.jump), crouchDown: inp.down('crouch'),
+      crouchPressed: !!(inp.pressed('crouch') || latch?.crouch),
+      sprintDown: inp.down('sprint'), sprintPressed: !!(inp.pressed('sprint') || latch?.sprint),
+      dashPressed: !!(inp.pressed('dash') || latch?.dash),
+      aimDown: aiming, usingGamepad: inp.usingGamepad,
+      grappleDown: inp.down('grapple'), grapplePressed: !!(inp.pressed('grapple') || latch?.grapple),
+    };
+    const apply = (stepDt) => step(this, moveIn, stepDt, ctx.world, {
+      mob: this.mob, adsSpeed: opt.adsSpeed, bounds: ctx.level.bounds, fallY: ctx.level.fallY,
+      conveyors: ctx.level.conveyors, fallDamage: !!ctx.fallDamage?.(), maxSprint: this.maxSprint, diff: this.diff, rings: ctx.level.rings,
+    }, { grapple: (gdt) => this._updateGrapple(gdt) });
+    let ev = {};
+    if (this._authFixed) {
+      this._stepAcc = (this._stepAcc || 0) + dt * (this._starve ? 0.9 : 1);
+      while (this._stepAcc >= STEP_DT) {
+        this._stepAcc -= STEP_DT;
+        ev = apply(STEP_DT);
+        if (this.onAuthStep) this.onAuthStep(moveIn);
+        // One frame of wall time may cover two 30 Hz steps. Edge buttons already fired.
+        moveIn.jumpPressed = false; moveIn.crouchPressed = false; moveIn.dashPressed = false;
+        moveIn.sprintPressed = false; moveIn.grapplePressed = false;
+        if (this._latch) this._latch = {};
       }
-    } else {
-      this.coyote -= dt; this.airT += dt;
-      const air = this.mob.air;
-      if (wishLen > 0) { const cur = b.vel.x * wish.x + b.vel.z * wish.z; const add = Math.min(AIR_CAP * air * wishLen - cur, AIR_ACCEL * air * dt); if (add > 0) { b.vel.x += wish.x * add; b.vel.z += wish.z * add; } }
+    } else ev = apply(dt);
+    const sprinting = this._sprinting;
+    if (ev.slid) { audio.slide(); this.kickFov(2.5); this.landDip.kick(-2.5); }
+    if (ev.jumped) { audio.jump(); this.landDip.kick(-1.2); }
+    if (ev.wallJumped) { audio.wallJump(); this.roll += (ev.wallSign || 1) * 0.1; this.kickFov(2); this.landDip.kick(-1.5); }
+    if (ev.doubleJumped) {
+      audio.jump(); this.kickFov(1.6); this.landDip.kick(-1.4);
+      _v2.copy(this.center); _v2.y -= 0.7;
+      this.ctx.effects.strokeBurst(_v2, INK.BLUE, 9, 4.5, { life: 0.28, size: 0.028, gravity: -2 });
     }
-    // ---- jumping / wall jump / air dash ----
-    if (inp.pressed('jump')) this.jumpBuffer = 0.15; else this.jumpBuffer -= dt;
-    this.wallJumpCd -= dt; this.mantleCd -= dt;
-    if (b.hitWall && !b.onGround) { this.wallTouch = 0; this.wallN.copy(b.wallNormal); } else this.wallTouch += dt;
-    if (this.jumpBuffer > 0) {
-      if (this.grapple.state === 'on') { this.jumpBuffer = 0; this.detachGrapple(true); }
-      else if (b.onGround || this.coyote > 0) {
-        this.jumpBuffer = 0; this.coyote = 0; b.vel.y = JUMP * this.mob.jump; b.onGround = false; this.airJumps = this.mob.doubleJump ? 1 : 0;
-        if (this.sliding) { b.vel.x *= 1.06; b.vel.z *= 1.06; this.sliding = false; }
-        audio.jump(); this.landDip.kick(-1.2);
-      } else if (this.wallTouch < 0.12 && this.wallJumpCd <= 0 && b.vel.y < 7 && this.mob.wallJump) {
-        this.jumpBuffer = 0; this.wallJumpCd = 0.35; const n = this.wallN;
-        b.vel.x = n.x * 7.5 + b.vel.x * 0.35 + _fwd.x * 2.5; b.vel.z = n.z * 7.5 + b.vel.z * 0.35 + _fwd.z * 2.5; b.vel.y = 9.2 * this.mob.jump;
-        audio.wallJump(); this.roll += n.dot(_right) > 0 ? -0.1 : 0.1; this.kickFov(2); this.landDip.kick(-1.5);
-        this.airJumps = this.mob.doubleJump ? 1 : 0;
-      } else if (this.airJumps > 0 && this.mob.doubleJump) {
-        // double jump: a second beat of height, and it redirects toward where you are steering
-        this.jumpBuffer = 0; this.airJumps--;
-        b.vel.y = JUMP * 0.92 * this.mob.jump;
-        if (wishLen > 0) { const cur = b.vel.x * wish.x + b.vel.z * wish.z; const add = Math.max(0, 7.5 * wishLen - cur); b.vel.x += wish.x * add; b.vel.z += wish.z * add; }
-        audio.jump(); this.kickFov(1.6); this.landDip.kick(-1.4);
-        _v2.copy(this.center); _v2.y -= 0.7;
-        this.ctx.effects.strokeBurst(_v2, INK.BLUE, 9, 4.5, { life: 0.28, size: 0.028, gravity: -2 });
-      }
+    if (ev.dashed) {
+      audio.dash(); this.kickFov(4); ctx.input.rumble(0.3, 0.6, 70);
+      if (ev.dashDir) {
+        this.roll += (ev.dashDir.x * this.right.x + ev.dashDir.z * this.right.z) * 0.08;
+        _v2.copy(this.center).addScaledVector(_v.set(ev.dashDir.x, 0, ev.dashDir.z), -0.6);
+      } else _v2.copy(this.center);
+      ctx.effects.strokeBurst(_v2, INK.BLUE, 10, 5, { life: 0.25, size: 0.03 });
     }
-    if ((inp.pressed('dash') || (inp.pressed('crouch') && !b.onGround)) && !b.onGround && this.dashCd <= 0 && this.grapple.state !== 'on' && this.mob.dash) this._dash(wishLen > 0 ? wish : _fwd);
-    // ---- gravity, grapple, mantle, integrate ----
-    b.vel.y -= G * this.gravityScale * (this.grapple.state === 'on' ? 0.88 : 1) * dt;
-    this._updateGrapple(dt);
-    if (!b.onGround && this.mantleCd <= 0 && mv.y > 0.3 && b.vel.y < 8 && this.grapple.state !== 'on') this._tryMantle(_fwd);
-    b.noSnap = this.grapple.state === 'on' || b.vel.y > 0.5;
-    const spd = b.vel.length(); if (spd > 48) b.vel.multiplyScalar(48 / spd);
-    const groundBeforeMove = b.onGround, yBeforeMove = b.pos.y;
-    ctx.world.moveBody(b, dt);
-    // Collision treads must stay discrete, but their step-up/snap-down must not jerk the view.
-    // Only smooth continuous grounded travel: jumps, falls and external teleports stay immediate.
-    if (groundBeforeMove && b.onGround && !b.noSnap) {
-      const step = b.pos.y - yBeforeMove;
-      if (Math.abs(step) <= b.stepHeight + 1e-3) this._stepOffset = clamp(this._stepOffset - step, -b.stepHeight, b.stepHeight);
+    if (ev.mantled) { audio.mantle(); this.landDip.kick(-2.5); this.kickFov(1.5); }
+    if (ev.grappleOff) {
+      this.rope.visible = false; this.hookMesh.visible = false; audio.reelLoop(false); ctx.hud.grappleTarget(0);
+      if (ev.grappleBoost) { audio.jump(); this.kickFov(3); } else audio.grappleRelease();
     }
-    const bounds = ctx.level.bounds;
-    if (b.onGround && ctx.level.conveyors) {
-      for (const c of ctx.level.conveyors) {
-        if (b.pos.x < c.min.x || b.pos.x > c.max.x || b.pos.y < c.min.y || b.pos.y > c.max.y || b.pos.z < c.min.z || b.pos.z > c.max.z) continue;
-        b.pos.x += c.vx * dt; b.pos.z += c.vz * dt;
-      }
-    }
-    if (b.pos.y < (ctx.level.fallY ?? -12) || b.pos.x < bounds.minX - 8 || b.pos.x > bounds.maxX + 8 || b.pos.z < bounds.minZ - 8 || b.pos.z > bounds.maxZ + 8) {
-      // Team deaths must resolve at the fall, before the survival-mode rescue relocates C4.
+    if (ev.fell) {
       this.detachGrapple(false); if (this.onFall?.() === true) return;
       b.pos.copy(ctx.level.playerStart); b.vel.set(0, 0, 0); this._stepOffset = 0; this.takeDamage(20, null);
       ctx.hud.message('OFF THE PAGE', 'redrawn at the start', 1.8);
     }
-    if (b.onGround && !this.lastGround) {
-      const impact = clamp(-b.landVel / 14, 0, 1.5); this.landDip.kick(-impact * 6 - 0.5); audio.land(impact);
-      if (impact > 0.8) { ctx.effects.shakeAmt += impact * 0.15; ctx.input.rumble(impact * 0.4, 0.2, 80); }
-      if (Math.hypot(b.vel.x, b.vel.z) > 9) this.landGraceT = 0.4;
-      if (this.alive && ctx.fallDamage?.()) {
-        const drop = -b.landVel;
-        if (drop > 16) this.takeDamage(Math.min(this.maxHp || 110, (drop - 16) * 6.2), null);
-      }
+    if (ev.landed) {
+      this.landDip.kick(-ev.impact * 6 - 0.5); audio.land(ev.impact);
+      if (ev.impact > 0.8) { ctx.effects.shakeAmt += ev.impact * 0.15; ctx.input.rumble(ev.impact * 0.4, 0.2, 80); }
     }
-    this.lastGround = b.onGround;
-    // ---- regen, bob, footsteps ----
+    if (ev.fallDamage) this.takeDamage(ev.fallDamage, null);
+    if (ev.outOfBreath) ctx.hud.tip('out of breath · walk it off', 1.2);
+    if (ev.winded) ctx.hud.tip('out of breath · land to recover', 1.4);
     if (this.regenRate > 0 && this.lastDamageT > this.regenDelay && this.hp < this.maxHp && !this._sprinting && this.grapple.state === 'idle') this.hp = Math.min(this.maxHp, this.hp + this.regenRate * dt);
-    // ---- sprint stamina (MEDIUM and up; maxSprint 0 means EASY and this whole block is off) ----
-    if (this.maxSprint > 0) {
-      const D = this.diff;
-      if (this._sprinting) {
-        this.sprintStam -= dt; this.sprintPause = D.sprintPause;
-        if (this.sprintStam <= 0) { this.sprintStam = 0; this.sprintLock = true; this.sprintToggle = false; ctx.hud.tip('out of breath · walk it off', 1.2); }
-      } else if ((this.sprintPause -= dt) <= 0) {
-        this.sprintStam = Math.min(this.maxSprint, this.sprintStam + this.maxSprint * D.sprintRegen * dt);
-        // a third of the tank back before the legs unlock, so an empty meter is not a one-step stutter
-        if (this.sprintLock && this.sprintStam > this.maxSprint * 0.3) this.sprintLock = false;
-      }
-      ctx.hud.setSprintStamina(this.sprintStam / this.maxSprint);
-    }
+    if (this.maxSprint > 0) ctx.hud.setSprintStamina(this.sprintStam / this.maxSprint);
     this.blockHeld = this.isBlocking ? this.blockHeld + dt : 0;
-    // the grapple runs on breath: hanging drains it, feet on the ground bring it back fast
-    this.stamPause -= dt;
-    if (this.grapple.state !== 'idle') this.grapStam -= STAM_DRAIN * dt; else if (this.stamPause <= 0) this.grapStam += (b.onGround ? STAM_GROUND : STAM_AIR) * dt;
-    this.grapStam = clamp(this.grapStam, 0, 1);
-    if (this.grapple.state === 'on' && this.grapStam <= 0) { this.detachGrapple(false); ctx.hud.tip('out of breath · land to recover', 1.4); }
     const hs2 = Math.hypot(b.vel.x, b.vel.z); const moving = b.onGround && hs2 > 0.6 && !this.sliding;
     this.bobAmt = damp(this.bobAmt, moving ? clamp(hs2 / 7, 0.3, 1.4) : 0, 8, dt);
     if (moving) { this.bobPhase += dt * (7 + hs2 * 0.5); this.stepDist += hs2 * dt; if (this.stepDist > (sprinting ? 2.5 : 2.0)) { this.stepDist = 0; audio.footstep(clamp(hs2 / 8, 0.3, 1)); } }

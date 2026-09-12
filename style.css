@@ -73,6 +73,7 @@ canvas#c { position: fixed; inset: 0; width: 100vw; height: 100vh; display: bloc
 .weapon { font-size: 36px; } .hint { font-size: 20px; opacity: .8; }
 .combo { font-size: 26px; color: var(--red); min-height: 30px; }
 .timer { font-size: 24px; color: var(--red); }
+.netpath { font-size: 12px; letter-spacing: 0.04em; opacity: 0.55; margin-top: 2px; }
 @media (max-width: 900px) { .panel h1 { font-size: 56px; } .panel .cols { flex-direction: column; gap: 10px; font-size: 18px; } .msg-main { font-size: 56px; }
   /* one column of settings rather than three, and the row keeps its shape by giving up label width */
   .config { gap: 6px; } .cfgcol { min-width: 0; width: 100%; } }

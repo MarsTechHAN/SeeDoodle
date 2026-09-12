@@ -1,5 +1,5 @@
 // Axis-aligned box world: static colliders, spatial hash, swept body movement with step-up, raycasts.
-import * as THREE from 'three';
+import * as THREE from '../vendor/three.module.js';
 
 const EPS = 1e-4;
 const AX = ['x', 'y', 'z'];

@@ -1,12 +1,21 @@
-// Level construction. Every map shares one builder: everything is merged ink geometry plus
-// axis-aligned box colliders, which is what the navigation grid is generated from. See `LEVELS`
-// below for what is actually offered - a map can be marked `pvpOnly`, and one is gated off
+// Level construction. Every map shares one builder: merged ink geometry plus axis-aligned
+// box colliders, which is what the navigation grid is generated from. See `LEVELS` below
+// for what is actually offered - a map can be marked `pvpOnly`, and one is gated off
 // entirely behind MEXICO_READY while it is unfinished.
-import * as THREE from 'three';
-import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import { makeInkMaterial, INK } from './render.js';
+//
+// collide vs decorate: the same builder functions write both, but `scene === null` skips
+// every Mesh/Texture/document call so Node can build the collision world without WebGL.
+// Materials, merges and humanoid props are injected via `bindLevelDraw` — importing them
+// here would pull render.js (and its shaders) into a headless server.
+import * as THREE from '../vendor/three.module.js';
+import { INK } from './ink.js';
 import { rand, choose, TAU } from './util.js';
-import { buildHumanoid } from './enemies.js';
+
+let draw = null;
+export function bindLevelDraw(api) { draw = api; }
+const makeInkMaterial = (o) => draw.makeInkMaterial(o);
+const mergeGeometries = (items, useGroups) => draw.mergeGeometries(items, useGroups);
+const buildHumanoid = (mat, solid, t) => draw.buildHumanoid(mat, solid, t);
 
 // Doodle Mexico is built and kept, but off the menu until it is ready; flip this to offer it again
 export const MEXICO_READY = false;
@@ -25,9 +34,11 @@ export const LEVELS = [
 ];
 
 function createBuilder(scene, world) {
+  const visual = !!scene;
   const geos = {}; const L = { rings: [], spawns: [], snipers: [], pickups: [], animated: [], meshes: [], playerStart: new THREE.Vector3(0, 0, 42), bounds: { minX: -55, maxX: 55, minZ: -55, maxZ: 55 }, arenaSpawns: [], grappleMovers: [], breakables: [], lifts: [], conveyors: [], buttons: [], doors: [], key: 'district' };
   // Keep semantic surfaces separate when merging; the classic shader still uses only the ink.
   const addGeo = (g, ink, surface = 'ink', classicOnly = false) => {
+    if (!visual) { g?.dispose?.(); return; }
     const key = `${ink}:${surface}:${classicOnly}`;
     (geos[key] || (geos[key] = { ink, surface, classicOnly, items: [] })).items.push(g);
   };
@@ -35,7 +46,7 @@ function createBuilder(scene, world) {
   function box(x, y, z, w, h, d, o = {}) {
     const surface = o.surface || (o.ink === INK.BLACK || (Math.min(w, d) < 0.3 && h > 1) ? 'metal' : h <= 1 && w > 3 && d > 3 ? 'ground' : 'plaster');
     const pad = o.visualPad || 0;
-    const g = new THREE.BoxGeometry(w + pad * 2, h + pad * 2, d + pad * 2); g.translate(x, y + h / 2, z); addGeo(g, o.ink ?? INK.BLUE, surface, !!o.classicOnly);
+    if (visual) { const g = new THREE.BoxGeometry(w + pad * 2, h + pad * 2, d + pad * 2); g.translate(x, y + h / 2, z); addGeo(g, o.ink ?? INK.BLUE, surface, !!o.classicOnly); }
     if (!o.noCollide) collider(x, y, z, w, h, d, o);
   }
   const slab = (x1, z1, x2, z2, y, t, o = {}) => {
@@ -87,14 +98,18 @@ function createBuilder(scene, world) {
     collider(cx, y, cz, ax ? len : 0.12, 1.0, ax ? 0.12 : len, { noNav: true, noShoot: true });
   }
   function cyl(x, y, z, r, h, o = {}) {
-    const g = new THREE.CylinderGeometry(r, r, h, o.seg ?? 12); g.translate(x, y + h / 2, z); addGeo(g, o.ink ?? INK.BLUE, o.surface || 'metal');
+    if (visual) { const g = new THREE.CylinderGeometry(r, r, h, o.seg ?? 12); g.translate(x, y + h / 2, z); addGeo(g, o.ink ?? INK.BLUE, o.surface || 'metal'); }
     if (!o.noCollide) collider(x, y, z, r * 1.6, h, r * 1.6, o);
   }
-  function sphere(x, y, z, r, o = {}) { const g = new THREE.SphereGeometry(r, o.seg ?? 10, o.seg ?? 8); g.translate(x, y, z); addGeo(g, o.ink ?? INK.BLUE, o.surface || (o.ink === INK.GREEN ? 'foliage' : 'ink'), !!o.classicOnly); }
+  function sphere(x, y, z, r, o = {}) {
+    if (visual) { const g = new THREE.SphereGeometry(r, o.seg ?? 10, o.seg ?? 8); g.translate(x, y, z); addGeo(g, o.ink ?? INK.BLUE, o.surface || (o.ink === INK.GREEN ? 'foliage' : 'ink'), !!o.classicOnly); }
+  }
   function ring(x, y, z, axis = 'z') {
-    const g = new THREE.TorusGeometry(0.6, 0.1, 8, 20);
-    if (axis === 'x') g.rotateY(Math.PI / 2); else if (axis === 'y') g.rotateX(Math.PI / 2);
-    g.translate(x, y, z); addGeo(g, INK.ORANGE);
+    if (visual) {
+      const g = new THREE.TorusGeometry(0.6, 0.1, 8, 20);
+      if (axis === 'x') g.rotateY(Math.PI / 2); else if (axis === 'y') g.rotateX(Math.PI / 2);
+      g.translate(x, y, z); addGeo(g, INK.ORANGE);
+    }
     L.rings.push(new THREE.Vector3(x, y, z));
   }
   const spawn = (x, y, z) => L.spawns.push(new THREE.Vector3(x, y, z));
@@ -102,17 +117,20 @@ function createBuilder(scene, world) {
   const pickup = (x, y, z) => L.pickups.push(new THREE.Vector3(x, y, z));
   // ---------------- shared finish ----------------
   function finish() {
-    for (const { ink, surface, classicOnly, items } of Object.values(geos)) {
-      const merged = mergeGeometries(items, false);
-      const mesh = new THREE.Mesh(merged, makeInkMaterial({ ink, surface }));
-      if (classicOnly) mesh.userData.skin = 'classic';
-      mesh.matrixAutoUpdate = false; scene.add(mesh); L.meshes.push(mesh);
+    if (visual) {
+      for (const { ink, surface, classicOnly, items } of Object.values(geos)) {
+        const merged = mergeGeometries(items, false);
+        const mesh = new THREE.Mesh(merged, makeInkMaterial({ ink, surface }));
+        if (classicOnly) mesh.userData.skin = 'classic';
+        mesh.matrixAutoUpdate = false; scene.add(mesh); L.meshes.push(mesh);
+      }
     }
     world.finalize();
     return L;
   }
   // a paper plane that loops overhead, purely decorative
   function planes(n, baseR, baseH, o = {}) {
+    if (!visual) return;
     const sc = o.scale || 1;
     for (let i = 0; i < n; i++) {
       const g = new THREE.ConeGeometry(1.2 * sc, 4 * sc, 3); g.rotateX(Math.PI / 2);
@@ -124,11 +142,11 @@ function createBuilder(scene, world) {
   }
   function breakable(kind, x, y, z, w, h, d, build, o = {}) {
     let g = null;
-    if (scene) { g = new THREE.Group(); build(g); g.position.set(x, y, z); scene.add(g); L.meshes.push(g); }
+    if (visual) { g = new THREE.Group(); build(g); g.position.set(x, y, z); scene.add(g); L.meshes.push(g); }
     const br = { id: L.breakables.length, kind, group: g, hp: o.hp ?? 1, pos: new THREE.Vector3(x, y + h / 2, z), alive: true, ink: o.ink ?? INK.TEAL, box: null };
     br.box = collider(x, y, z, w, h, d, { noNav: o.noNav !== false }); br.box.data.breakable = br; L.breakables.push(br); return br;
   }
-  return { L, addGeo, collider, box, slab, wallX, wallZ, stairs, rail, cyl, sphere, ring, spawn, sniper, pickup, finish, planes, breakable, scene, world };
+  return { L, addGeo, collider, box, slab, wallX, wallZ, stairs, rail, cyl, sphere, ring, spawn, sniper, pickup, finish, planes, breakable, scene, world, visual };
 }
 
 // ============================ map 1: Doodle District ============================
@@ -559,17 +577,11 @@ function buildUndercity(B, arena = false, team = false) {
 // a church with a bell tower, adobe houses, a market of piñatas, a taco cart, and mesas all around.
 // Pots, crates, barrels, cacti and piñatas all break.
 function buildMexico(B, arena = false) {
-  const { L, box, slab, stairs, rail, cyl, sphere, ring, spawn, sniper, pickup, planes, addGeo, collider, scene } = B;
+  const { L, box, slab, stairs, rail, cyl, sphere, ring, spawn, sniper, pickup, planes, addGeo, collider, breakable, scene } = B;
   const OR = INK.ORANGE, GR = INK.GREEN, PK = INK.PINK, BK = INK.BLACK, BL = INK.BLUE;
   L.key = 'mexico'; L.playerStart.set(0, 0, 16); const P = 62; L.bounds = { minX: -P, maxX: P, minZ: -P, maxZ: P };
   const mat = (ink, fill = false) => makeInkMaterial({ ink, fill, side: fill ? THREE.DoubleSide : THREE.FrontSide });
   const mesh = (geo, ink, fill = false) => new THREE.Mesh(geo, mat(ink, fill));
-  // a prop that can be broken: its own meshes (so they can fly off) and a tagged collider
-  const breakable = (kind, x, y, z, w, h, d, build, o = {}) => {
-    const g = new THREE.Group(); build(g); g.position.set(x, y, z); scene.add(g); L.meshes.push(g);
-    const br = { id: L.breakables.length, kind, group: g, hp: o.hp ?? 1, pos: new THREE.Vector3(x, y + h / 2, z), alive: true, ink: o.ink ?? OR, box: null };
-    br.box = collider(x, y, z, w, h, d, { noNav: true }); br.box.data.breakable = br; L.breakables.push(br); return br;
-  };
   const pot = (x, z, big = false) => breakable('pot', x, 0, z, big ? 1.2 : 0.9, big ? 1.3 : 0.9, big ? 1.2 : 0.9, (g) => {
     const r = big ? 0.55 : 0.4, h = big ? 1.2 : 0.85;
     g.add(mesh(new THREE.CylinderGeometry(r * 0.75, r, h, 9).translate(0, h / 2, 0), OR)); g.add(mesh(new THREE.TorusGeometry(r * 0.72, 0.05, 5, 12).rotateX(Math.PI / 2).translate(0, h, 0), BK));
@@ -618,6 +630,7 @@ function buildMexico(B, arena = false) {
   for (let k = 0; k < 8; k++) { const a = (k / 8) * TAU + Math.PI / 8; cyl(Math.cos(a) * 5.6, 1.2, -26 + Math.sin(a) * 5.6, 0.22, 4.2, { noCollide: true, ink: OR }); }
   addGeo(new THREE.ConeGeometry(7.6, 3.2, 8).translate(0, 7.0, -26), OR); collider(0, 5.4, -26, 9, 0.5, 9, { noNav: true }); addGeo(new THREE.CylinderGeometry(7.6, 7.6, 0.3, 8).translate(0, 5.55, -26), BL); ring(0, 9.4, -26, 'y');
   const mariachi = (x, z, yaw, guitar) => {
+    if (!scene) return;
     const m = buildHumanoid(makeInkMaterial({ ink: BK, shadeScale: 0, shadeBias: 1 }), makeInkMaterial({ ink: BK, fill: true, side: THREE.DoubleSide }), { weapon: 'rifle', scale: 1, hat: 'none', build: { bodyW: 1.05, headS: 1, limbR: 0.034 } });
     const J = m.J; while (J.gun.children.length) J.gun.remove(J.gun.children[0]);
     // sombrero: a wide brim and a tall crown; a guitar or a trumpet in the hands
@@ -1313,13 +1326,13 @@ function buildTimesSquare(B) {
   L.tactical={buildings:[],water:[],paths:[],labels:L.zones.map(({name,x,z,id})=>({name,x,z,small:['marriott','astor','paramount','arcade','avenue'].includes(id)}))};
   const detail={noCollide:true}, dark={surface:'metal',ink:INK.BLACK}, stone={surface:'stone',ink:INK.BROWN}, pale={surface:'ceramic',ink:INK.BLACK};
   const glass={surface:'glass',ink:INK.TEAL}, red={surface:'cloth',ink:INK.RED}, bronze={surface:'metal',ink:INK.BROWN};
-  if(!timesSquareAtlas) {
+  if(scene && !timesSquareAtlas) {
     timesSquareAtlas=new THREE.TextureLoader().load(new URL('../assets/times-square-billboards-v2.jpg',import.meta.url).href,tex=>{tex.userData.ready=true;},undefined,()=>{timesSquareAtlas.userData.failed=true;});
     timesSquareAtlas.minFilter=THREE.LinearMipmapLinearFilter; timesSquareAtlas.magFilter=THREE.LinearFilter;
     timesSquareAtlas.wrapS=timesSquareAtlas.wrapT=THREE.ClampToEdgeWrapping; timesSquareAtlas.anisotropy=4;
     timesSquareAtlas.userData.ready=false;
   }
-  L.textures=[timesSquareAtlas]; const ads=[];
+  if(scene) L.textures=[timesSquareAtlas]; const ads=[];
   const tileUV=(g,tile,aspect=1)=>{
     const uv=g.getAttribute('uv'), col=tile%4,row=Math.floor(tile/4), inset=8.5;
     const crop=[0,2,12,13,14,15].includes(tile),cw=crop?Math.min(1,aspect):1,ch=crop?Math.min(1,1/aspect):1;
@@ -1602,7 +1615,7 @@ function buildTimesSquare(B) {
   for(const[x,y,z]of[[-39,0,-17],[39,0,26],[-9,4.92,-70.5],[10,0,-25],[-17,0,-26],[18,0,27],[-20,0,62],[23,0,46],[-18,.12,-78],[17,0,-83]])pickup(x,y+.2,z);
   L.arenaSpawns=[...L.teamSpawns.flat(),...L.spawns].map(p=>p.clone());
   const result=B.finish();
-  if(ads.length){const mesh=new THREE.Mesh(mergeGeometries(ads,false),makeInkMaterial({surface:'screen',map:timesSquareAtlas,ink:INK.BLACK}));mesh.matrixAutoUpdate=false;scene.add(mesh);L.meshes.push(mesh);L.billboards=mesh;}
+  if(scene && ads.length){const mesh=new THREE.Mesh(mergeGeometries(ads,false),makeInkMaterial({surface:'screen',map:timesSquareAtlas,ink:INK.BLACK}));mesh.matrixAutoUpdate=false;scene.add(mesh);L.meshes.push(mesh);L.billboards=mesh;}
   return result;
 }
 
@@ -2179,7 +2192,7 @@ function buildGreatWall(B) {
     const nx=Math.ceil((x2-x1)/(edgeAxis==='x'?2:cell)),nz=Math.ceil((z2-z1)/(edgeAxis==='z'?2:cell)),g=new THREE.PlaneGeometry(x2-x1,z2-z1,nx,nz);g.rotateX(-Math.PI/2);g.translate((x1+x2)/2,0,(z1+z2)/2);
     const a=g.attributes.position;for(let i=0;i<a.count;i++)a.setY(i,height(a.getX(i),a.getZ(i)));g.computeVertexNormals();return g;
   };
-  addGeo(terrainGeo(-128,-74,128,84,2,ground),INK.GREEN,'grass');
+  if(B.scene) addGeo(terrainGeo(-128,-74,128,84,2,ground),INK.GREEN,'grass');
   // The visible terrain is smooth; compact non-navigation columns catch an accidental vault
   // over a parapet, while all planned routes use their own fine, step-height collision grid.
   for(let x=-119;x<120;x+=2)for(let z=-65;z<76;z+=2){const y=Math.max(ground(x-.7,z-.7),ground(x+.7,z-.7),ground(x-.7,z+.7),ground(x+.7,z+.7));collider(x,-25,z,2.01,y+25,2.01,{noNav:true});}
@@ -2189,19 +2202,21 @@ function buildGreatWall(B) {
     const blend=Math.max(0,Math.min(1,d/110));return near*(1-blend)+mountains*blend;
   };
   // Match the near terrain's two-meter boundary samples exactly to avoid visible cracks.
-  const scenery = new THREE.Mesh(mergeGeometries([terrainGeo(-620,-650,620,-74,18,farHeight,'x'),terrainGeo(-620,84,620,420,18,farHeight,'x'),terrainGeo(-620,-74,-128,84,18,farHeight,'z'),terrainGeo(128,-74,620,84,18,farHeight,'z')],false),makeInkMaterial({surface:'grass',ink:INK.GREEN}));
-  scenery.userData.noSun=true;scenery.matrixAutoUpdate=false;B.scene.add(scenery);L.meshes.push(scenery);
-  // The wall continues over the distant ridge beyond the closed end-tower gates.
-  const distantWall=[];
-  const distantBox=(x,y,z,w,h,d,yaw=0)=>{const g=new THREE.BoxGeometry(w,h,d);g.rotateY(yaw);g.translate(x,y+h*.5,z);distantWall.push(g);};
-  for(const points of [[[-103.6,12,22],[-125,12,15],[-151,0,-17],[-176,0,-49],[-191,0,-88],[-218,0,-117]],[[103.6,42,20],[127,42,8],[151,0,-21],[176,0,-55],[209,0,-77],[233,0,-114]]]){
-    for(let k=2;k<points.length;k++)points[k][1]=farHeight(points[k][0],points[k][2])+5.5;
-    for(let k=0;k<points.length-1;k++){const a=points[k],b=points[k+1],dx=b[0]-a[0],dz=b[2]-a[2],len=Math.hypot(dx,dz),n=Math.ceil(len/2.1),nx=dz/len,nz=-dx/len,yaw=Math.atan2(dx,dz);
-      for(let i=0;i<n;i++){const t=(i+.5)/n,x=a[0]+dx*t,z=a[2]+dz*t,y=a[1]+(b[1]-a[1])*t;distantBox(x,y-5.6,z,5.4,5.6,len/n+.08,yaw);for(const side of[-1,1]){distantBox(x+nx*side*2.4,y,z+nz*side*2.4,.58,.92,len/n+.1,yaw);if(i%2===0)distantBox(x+nx*side*2.4,y+.92,z+nz*side*2.4,.62,.62,1.0,yaw);}}
-      if(k>1&&k%2===0){const [x,y,z]=b;distantBox(x,y-5.6,z,8,10.0,8);for(const side of[-1,1])for(let q=-3;q<=3;q+=2){distantBox(x+side*3.7,y+4.4,z+q,.6,.9,.95);distantBox(x+q,y+4.4,z+side*3.7,.95,.9,.6);}}
+  if(B.scene){
+    const scenery = new THREE.Mesh(mergeGeometries([terrainGeo(-620,-650,620,-74,18,farHeight,'x'),terrainGeo(-620,84,620,420,18,farHeight,'x'),terrainGeo(-620,-74,-128,84,18,farHeight,'z'),terrainGeo(128,-74,620,84,18,farHeight,'z')],false),makeInkMaterial({surface:'grass',ink:INK.GREEN}));
+    scenery.userData.noSun=true;scenery.matrixAutoUpdate=false;B.scene.add(scenery);L.meshes.push(scenery);
+    // The wall continues over the distant ridge beyond the closed end-tower gates.
+    const distantWall=[];
+    const distantBox=(x,y,z,w,h,d,yaw=0)=>{const g=new THREE.BoxGeometry(w,h,d);g.rotateY(yaw);g.translate(x,y+h*.5,z);distantWall.push(g);};
+    for(const points of [[[-103.6,12,22],[-125,12,15],[-151,0,-17],[-176,0,-49],[-191,0,-88],[-218,0,-117]],[[103.6,42,20],[127,42,8],[151,0,-21],[176,0,-55],[209,0,-77],[233,0,-114]]]){
+      for(let k=2;k<points.length;k++)points[k][1]=farHeight(points[k][0],points[k][2])+5.5;
+      for(let k=0;k<points.length-1;k++){const a=points[k],b=points[k+1],dx=b[0]-a[0],dz=b[2]-a[2],len=Math.hypot(dx,dz),n=Math.ceil(len/2.1),nx=dz/len,nz=-dx/len,yaw=Math.atan2(dx,dz);
+        for(let i=0;i<n;i++){const t=(i+.5)/n,x=a[0]+dx*t,z=a[2]+dz*t,y=a[1]+(b[1]-a[1])*t;distantBox(x,y-5.6,z,5.4,5.6,len/n+.08,yaw);for(const side of[-1,1]){distantBox(x+nx*side*2.4,y,z+nz*side*2.4,.58,.92,len/n+.1,yaw);if(i%2===0)distantBox(x+nx*side*2.4,y+.92,z+nz*side*2.4,.62,.62,1.0,yaw);}}
+        if(k>1&&k%2===0){const [x,y,z]=b;distantBox(x,y-5.6,z,8,10.0,8);for(const side of[-1,1])for(let q=-3;q<=3;q+=2){distantBox(x+side*3.7,y+4.4,z+q,.6,.9,.95);distantBox(x+q,y+4.4,z+side*3.7,.95,.9,.6);}}
+      }
     }
+    const continuation=new THREE.Mesh(mergeGeometries(distantWall,false),makeInkMaterial(BR));continuation.userData.noSun=true;continuation.matrixAutoUpdate=false;B.scene.add(continuation);L.meshes.push(continuation);
   }
-  const continuation=new THREE.Mesh(mergeGeometries(distantWall,false),makeInkMaterial(BR));continuation.userData.noSun=true;continuation.matrixAutoUpdate=false;B.scene.add(continuation);L.meshes.push(continuation);
   const rotatedBox = (x,y,z,w,h,d,yaw,ink,surface) => { const g=new THREE.BoxGeometry(w,h,d);g.rotateY(yaw);g.translate(x,y+h*.5,z);addGeo(g,ink,surface); };
   const floors=new Map(), cs=1;
   const markFloor=(a,b,width,y)=>{
@@ -2281,10 +2296,12 @@ function buildGreatWall(B) {
   // Merged woodland clusters retain the densely forested mountain silhouette without extra actors.
   let seed=73471;const random=()=>{seed=(Math.imul(seed,1664525)+1013904223)>>>0;return seed/4294967296;};
   const avoid=(x,z)=>corridors.some(p=>{const dx=p.b[0]-p.a[0],dz=p.b[2]-p.a[2],n=dx*dx+dz*dz,t=Math.max(0,Math.min(1,((x-p.a[0])*dx+(z-p.a[2])*dz)/n));return Math.hypot(x-p.a[0]-t*dx,z-p.a[2]-t*dz)<p.width*.5+2.4;})||towers.some(t=>Math.abs(x-t.x)<10&&Math.abs(z-t.z)<9)||(Math.abs(x)<10&&Math.abs(z-66)<9);
-  for(let i=0;i<1100;i++){const x=-124+random()*248,z=-72+random()*152;if(avoid(x,z))continue;const y=ground(x,z),h=2.7+random()*3.4,r=1.4+random()*1.3;const trunk=new THREE.CylinderGeometry(.1,.18,h,5);trunk.translate(x,y+h*.5,z);addGeo(trunk,INK.BROWN,'wood');for(let j=0;j<3;j++){const crown=new THREE.IcosahedronGeometry(r,1);crown.scale(1,.65+random()*.4,1);crown.translate(x+(random()-.5)*1.2,y+h+j*.7,z+(random()-.5)*1.2);addGeo(crown,i%9===0?INK.BROWN:INK.GREEN,'foliage');}}
-  const forest=[];
-  for(let i=0;i<8000;i++){const x=-485+random()*970,z=-480+random()*820;if(Math.abs(x)<130&&z>-77&&z<87)continue;const r=2.5+random()*2.0,h=2.8+random()*3.0,y=farHeight(x,z),g=new THREE.SphereGeometry(r,7,5);g.scale(1,.8+random()*.5,1);g.translate(x,y+h,z);forest.push(g);}
-  const woods=new THREE.Mesh(mergeGeometries(forest,false),makeInkMaterial({surface:'foliage',ink:INK.GREEN}));woods.userData.noSun=true;woods.matrixAutoUpdate=false;B.scene.add(woods);L.meshes.push(woods);
+  if(B.scene){
+    for(let i=0;i<1100;i++){const x=-124+random()*248,z=-72+random()*152;if(avoid(x,z))continue;const y=ground(x,z),h=2.7+random()*3.4,r=1.4+random()*1.3;const trunk=new THREE.CylinderGeometry(.1,.18,h,5);trunk.translate(x,y+h*.5,z);addGeo(trunk,INK.BROWN,'wood');for(let j=0;j<3;j++){const crown=new THREE.IcosahedronGeometry(r,1);crown.scale(1,.65+random()*.4,1);crown.translate(x+(random()-.5)*1.2,y+h+j*.7,z+(random()-.5)*1.2);addGeo(crown,i%9===0?INK.BROWN:INK.GREEN,'foliage');}}
+    const forest=[];
+    for(let i=0;i<8000;i++){const x=-485+random()*970,z=-480+random()*820;if(Math.abs(x)<130&&z>-77&&z<87)continue;const r=2.5+random()*2.0,h=2.8+random()*3.0,y=farHeight(x,z),g=new THREE.SphereGeometry(r,7,5);g.scale(1,.8+random()*.5,1);g.translate(x,y+h,z);forest.push(g);}
+    const woods=new THREE.Mesh(mergeGeometries(forest,false),makeInkMaterial({surface:'foliage',ink:INK.GREEN}));woods.userData.noSun=true;woods.matrixAutoUpdate=false;B.scene.add(woods);L.meshes.push(woods);
+  }
   for(const side of[-1,1]){collider(side*121,-24,5,2,103,145,{noNav:true,noGrapple:true});collider(0,-24,side<0?-67:77,244,103,2,{noNav:true,noGrapple:true});}collider(0,78,5,244,4,146,{noNav:true,noGrapple:true});
   L.teamSpawns=[towers[0],towers[4]].map(t=>[-2.2,2.2].flatMap(dz=>[-3.6,-1.2,1.2,3.6].map(dx=>new THREE.Vector3(t.x+dx,t.y+.08,t.z+dz))));
   L.teamFacing=[-Math.PI/2,Math.PI/2];L.playerStart.copy(L.teamSpawns[0][0]);
@@ -2528,99 +2545,50 @@ function buildLombard(B) {
   L.zones = [{ name: 'Hyde Street', x: 0, z: -73, bounds: { minX: -47, maxX: 47, minZ: -83, maxZ: -63 } }, { name: 'Eight Hairpin Turns', x: 0, z: 0, bounds: { minX: -18, maxX: 18, minZ: -63, maxZ: 63 } }, { name: 'Leavenworth Street', x: 0, z: 73, bounds: { minX: -47, maxX: 47, minZ: 63, maxZ: 83 } }];
   L.tactical = { buildings, water: [], paths, labels: [{ name: 'Hyde Street', x: 0, z: -73 }, { name: 'Eight Hairpin Turns', x: 0, z: 0, small: true }, { name: 'Leavenworth Street', x: 0, z: 73 }, { name: 'Garden Courtyard', x: -31, z: -22, small: true }, { name: 'Terrace Garden', x: 31, z: 22, small: true }] };
   const result = B.finish();
-  if (!buildLombard.signs) {
-    const canvas = document.createElement('canvas'); canvas.width = 1024; canvas.height = 256;
-    const c = canvas.getContext('2d');
-    for (const [i, name] of ['LOMBARD ST', 'HYDE ST', 'LEAVENWORTH ST', '5 MPH'].entries()) {
-      c.fillStyle = i === 3 ? '#d3bb69' : '#24493f'; c.fillRect(i * 256, 0, 256, 256);
-      c.fillStyle = i === 3 ? '#252a28' : '#f0eee5'; c.font = `bold ${i === 2 ? 23 : 31}px sans-serif`; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText(name, i * 256 + 128, 128, 236);
+  if (B.scene) {
+    if (!buildLombard.signs) {
+      const canvas = document.createElement('canvas'); canvas.width = 1024; canvas.height = 256;
+      const c = canvas.getContext('2d');
+      for (const [i, name] of ['LOMBARD ST', 'HYDE ST', 'LEAVENWORTH ST', '5 MPH'].entries()) {
+        c.fillStyle = i === 3 ? '#d3bb69' : '#24493f'; c.fillRect(i * 256, 0, 256, 256);
+        c.fillStyle = i === 3 ? '#252a28' : '#f0eee5'; c.font = `bold ${i === 2 ? 23 : 31}px sans-serif`; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText(name, i * 256 + 128, 128, 236);
+      }
+      buildLombard.signs = new THREE.CanvasTexture(canvas);
     }
-    buildLombard.signs = new THREE.CanvasTexture(canvas);
-  }
-  const signs = [];
-  for (const [x, y, z, index, yaw, width] of [[-18, 38.2, -66, 0, 0, 3.8], [-18, 37.6, -66, 1, 0, 3.0], [18, 4.2, 66, 0, Math.PI, 3.8], [18, 3.6, 66, 2, Math.PI, 4.5], [12, 36.3, -64, 3, 0, 1.4]]) {
-    const g = new THREE.PlaneGeometry(width, .65), uv = g.attributes.uv;
-    for (let i = 0; i < uv.count; i++) uv.setXY(i, (index + .02 + uv.getX(i) * .96) / 4, .24 + uv.getY(i) * .52);
-    g.rotateY(yaw); g.translate(x, y, z); signs.push(g);
-  }
-  const signMesh = new THREE.Mesh(mergeGeometries(signs, false), makeInkMaterial({ surface: 'screen', ink: INK.GREEN, map: buildLombard.signs }));
-  signMesh.matrixAutoUpdate = false; B.scene.add(signMesh); result.meshes.push(signMesh);
-  // The bay and Telegraph Hill are scenery only and must not dilute the playable shadow map.
-  const scenic = new Map();
-  const scenery = (g, ink, surface) => { const key = `${ink}:${surface}`; if (!scenic.has(key)) scenic.set(key, { ink, surface, geos: [] }); scenic.get(key).geos.push(g); };
-  const neighborhood = new THREE.PlaneGeometry(520, 340, 2, 136); neighborhood.rotateX(-Math.PI / 2);
-  const np = neighborhood.attributes.position; for (let i = 0; i < np.count; i++) np.setY(i, hill(np.getZ(i)) - .3); neighborhood.computeVertexNormals(); scenery(neighborhood, INK.BLACK, 'ground');
-  for (const s of [-1, 1]) for (let i = 0; i < 9; i++) {
-    const z = -106 + i * 27, h = 8 + (i % 3) * 3, x = s * (68 + (i % 2) * 6);
-    scenery(new THREE.BoxGeometry(24, h, 19).translate(x, hill(z) + h / 2, z), [INK.BLUE, INK.PINK, INK.ORANGE][i % 3], 'stucco');
-    scenery(new THREE.BoxGeometry(24.6, .45, 19.6).translate(x, hill(z) + h, z), INK.BLACK, 'stone');
-  }
-  scenery(new THREE.BoxGeometry(360, .4, 230).translate(0, -18, 300), INK.TEAL, 'water');
-  for (let row = 0; row < 4; row++) for (let i = 0; i < 14; i++) {
-    const x = -154 + i * 23 + (row % 2) * 8, z = 111 + row * 29, h = 8 + rnd() * 17, y = -6 - row * 3;
-    scenery(new THREE.BoxGeometry(13 + rnd() * 7, h, 15 + rnd() * 6).translate(x, y + h / 2, z), [INK.BLUE, INK.PINK, INK.ORANGE][i % 3], 'stucco');
-  }
-  const coitBase = new THREE.SphereGeometry(30, 16, 9); coitBase.scale(1.5, .45, 1); coitBase.translate(64, -1, 191); scenery(coitBase, INK.GREEN, 'grass');
-  scenery(new THREE.CylinderGeometry(3.8, 4.4, 32, 12).translate(64, 27, 191), INK.BLUE, 'limestone');
-  scenery(new THREE.CylinderGeometry(4.3, 3.8, 3, 12).translate(64, 44, 191), INK.BLUE, 'limestone');
-  for (let j = 0; j < 12; j++) {
-    const a = j / 12 * TAU, g = new THREE.BoxGeometry(1.1, 3.5, .12); g.rotateY(-a); g.translate(64 + Math.sin(a) * 4.0, 42.2, 191 + Math.cos(a) * 4.0); scenery(g, INK.BLACK, 'glass');
-  }
-  for (const { ink, surface, geos } of scenic.values()) {
-    const m = new THREE.Mesh(mergeGeometries(geos, false), makeInkMaterial({ ink, surface })); m.userData.noSun = true; m.matrixAutoUpdate = false; B.scene.add(m); result.meshes.push(m);
+    const signs = [];
+    for (const [x, y, z, index, yaw, width] of [[-18, 38.2, -66, 0, 0, 3.8], [-18, 37.6, -66, 1, 0, 3.0], [18, 4.2, 66, 0, Math.PI, 3.8], [18, 3.6, 66, 2, Math.PI, 4.5], [12, 36.3, -64, 3, 0, 1.4]]) {
+      const g = new THREE.PlaneGeometry(width, .65), uv = g.attributes.uv;
+      for (let i = 0; i < uv.count; i++) uv.setXY(i, (index + .02 + uv.getX(i) * .96) / 4, .24 + uv.getY(i) * .52);
+      g.rotateY(yaw); g.translate(x, y, z); signs.push(g);
+    }
+    const signMesh = new THREE.Mesh(mergeGeometries(signs, false), makeInkMaterial({ surface: 'screen', ink: INK.GREEN, map: buildLombard.signs }));
+    signMesh.matrixAutoUpdate = false; B.scene.add(signMesh); result.meshes.push(signMesh);
+    // The bay and Telegraph Hill are scenery only and must not dilute the playable shadow map.
+    const scenic = new Map();
+    const scenery = (g, ink, surface) => { const key = `${ink}:${surface}`; if (!scenic.has(key)) scenic.set(key, { ink, surface, geos: [] }); scenic.get(key).geos.push(g); };
+    const neighborhood = new THREE.PlaneGeometry(520, 340, 2, 136); neighborhood.rotateX(-Math.PI / 2);
+    const np = neighborhood.attributes.position; for (let i = 0; i < np.count; i++) np.setY(i, hill(np.getZ(i)) - .3); neighborhood.computeVertexNormals(); scenery(neighborhood, INK.BLACK, 'ground');
+    for (const s of [-1, 1]) for (let i = 0; i < 9; i++) {
+      const z = -106 + i * 27, h = 8 + (i % 3) * 3, x = s * (68 + (i % 2) * 6);
+      scenery(new THREE.BoxGeometry(24, h, 19).translate(x, hill(z) + h / 2, z), [INK.BLUE, INK.PINK, INK.ORANGE][i % 3], 'stucco');
+      scenery(new THREE.BoxGeometry(24.6, .45, 19.6).translate(x, hill(z) + h, z), INK.BLACK, 'stone');
+    }
+    scenery(new THREE.BoxGeometry(360, .4, 230).translate(0, -18, 300), INK.TEAL, 'water');
+    for (let row = 0; row < 4; row++) for (let i = 0; i < 14; i++) {
+      const x = -154 + i * 23 + (row % 2) * 8, z = 111 + row * 29, h = 8 + rnd() * 17, y = -6 - row * 3;
+      scenery(new THREE.BoxGeometry(13 + rnd() * 7, h, 15 + rnd() * 6).translate(x, y + h / 2, z), [INK.BLUE, INK.PINK, INK.ORANGE][i % 3], 'stucco');
+    }
+    const coitBase = new THREE.SphereGeometry(30, 16, 9); coitBase.scale(1.5, .45, 1); coitBase.translate(64, -1, 191); scenery(coitBase, INK.GREEN, 'grass');
+    scenery(new THREE.CylinderGeometry(3.8, 4.4, 32, 12).translate(64, 27, 191), INK.BLUE, 'limestone');
+    scenery(new THREE.CylinderGeometry(4.3, 3.8, 3, 12).translate(64, 44, 191), INK.BLUE, 'limestone');
+    for (let j = 0; j < 12; j++) {
+      const a = j / 12 * TAU, g = new THREE.BoxGeometry(1.1, 3.5, .12); g.rotateY(-a); g.translate(64 + Math.sin(a) * 4.0, 42.2, 191 + Math.cos(a) * 4.0); scenery(g, INK.BLACK, 'glass');
+    }
+    for (const { ink, surface, geos } of scenic.values()) {
+      const m = new THREE.Mesh(mergeGeometries(geos, false), makeInkMaterial({ ink, surface })); m.userData.noSun = true; m.matrixAutoUpdate = false; B.scene.add(m); result.meshes.push(m);
+    }
   }
   return result;
-}
-
-function populateMatchSpawns(L, world) {
-  const q = [], min = new THREE.Vector3(), max = new THREE.Vector3(), bounds = L.bounds;
-  const fit = (x, y, z) => {
-    if (x < bounds.minX + 1 || x > bounds.maxX - 1 || z < bounds.minZ + 1 || z > bounds.maxZ - 1) return null;
-    min.set(x - .44, y - 1.4, z - .44); max.set(x + .44, y + 2.6, z + .44); world.query(min, max, q);
-    const heights = [];
-    for (const [dx, dz] of [[0, 0], [-.42, -.42], [-.42, .42], [.42, -.42], [.42, .42]]) {
-      let top = -Infinity;
-      for (const b of q) if (!b.data.noNav && b.max.y <= y + .65 && b.min.x <= x + dx && b.max.x >= x + dx && b.min.z <= z + dz && b.max.z >= z + dz) top = Math.max(top, b.max.y);
-      if (!Number.isFinite(top)) return null;
-      heights.push(top);
-    }
-    const floor = Math.max(...heights);
-    if (floor - Math.min(...heights) > .4) return null;
-    min.set(x - .44, floor + .04, z - .44); max.set(x + .44, floor + 1.84, z + .44);
-    return world.overlapsAABB(min, max) ? null : new THREE.Vector3(x, floor + .05, z);
-  };
-  // A larger lobby needs actual standing room, not multiple actors wrapped onto the same
-  // eight entries. Resolve nearby points against every map's real floors and full body volume.
-  if (L.teamSpawns?.length === 2) {
-    const original = L.teamSpawns.map(team => team.map(p => p.clone()));
-    const middle = original.map(team => team.reduce((v, p) => v.add(p), new THREE.Vector3()).divideScalar(team.length));
-    L.teamSpawns = original.map((seeds, team) => {
-      const points = [];
-      const accept = p => {
-        if (!p || points.some(q => Math.abs(q.y - p.y) < 1.8 && Math.hypot(q.x - p.x, q.z - p.z) < 1.15)) return;
-        if (p.distanceToSquared(middle[team]) > p.distanceToSquared(middle[1 - team])) return;
-        points.push(p);
-      };
-      for (const p of seeds) accept(fit(p.x, p.y, p.z));
-      for (let ring = 1; ring <= 10 && points.length < 16; ring++) for (const seed of seeds) {
-        for (let i = 0; i < ring * 8 && points.length < 16; i++) {
-          const a = i / (ring * 8) * TAU, r = ring * 1.35;
-          const p = fit(seed.x + Math.sin(a) * r, seed.y, seed.z + Math.cos(a) * r);
-          if (!p) continue;
-          // Reject a clear pocket on the other side of a spawn-room wall.
-          let clear = true;
-          for (let j = 1, n = Math.ceil(r / .6); j < n; j++) {
-            const k = j / n, x = seed.x + (p.x - seed.x) * k, z = seed.z + (p.z - seed.z) * k;
-            min.set(x - .35, Math.max(seed.y, p.y) + .48, z - .35); max.set(x + .35, Math.max(seed.y, p.y) + 1.72, z + .35);
-            if (world.overlapsAABB(min, max)) { clear = false; break; }
-          }
-          if (clear) accept(p);
-        }
-      }
-      return points;
-    });
-  }
-  return L;
 }
 
 // ============================ Dinghao DH3 ============================
@@ -3577,9 +3545,67 @@ function buildDinghao(B) {
   return B.finish();
 }
 
-export function buildLevel(scene, world, key = 'district', opts = {}) {
+function populateMatchSpawns(L, world) {
+  const q = [], min = new THREE.Vector3(), max = new THREE.Vector3(), bounds = L.bounds;
+  const fit = (x, y, z) => {
+    if (x < bounds.minX + 1 || x > bounds.maxX - 1 || z < bounds.minZ + 1 || z > bounds.maxZ - 1) return null;
+    min.set(x - .44, y - 1.4, z - .44); max.set(x + .44, y + 2.6, z + .44); world.query(min, max, q);
+    const heights = [];
+    for (const [dx, dz] of [[0, 0], [-.42, -.42], [-.42, .42], [.42, -.42], [.42, .42]]) {
+      let top = -Infinity;
+      for (const b of q) if (!b.data.noNav && b.max.y <= y + .65 && b.min.x <= x + dx && b.max.x >= x + dx && b.min.z <= z + dz && b.max.z >= z + dz) top = Math.max(top, b.max.y);
+      if (!Number.isFinite(top)) return null;
+      heights.push(top);
+    }
+    const floor = Math.max(...heights);
+    if (floor - Math.min(...heights) > .4) return null;
+    min.set(x - .44, floor + .04, z - .44); max.set(x + .44, floor + 1.84, z + .44);
+    return world.overlapsAABB(min, max) ? null : new THREE.Vector3(x, floor + .05, z);
+  };
+  // A larger lobby needs actual standing room, not multiple actors wrapped onto the same
+  // eight entries. Resolve nearby points against every map's real floors and full body volume.
+  if (L.teamSpawns?.length === 2) {
+    const original = L.teamSpawns.map(team => team.map(p => p.clone()));
+    const middle = original.map(team => team.reduce((v, p) => v.add(p), new THREE.Vector3()).divideScalar(team.length));
+    L.teamSpawns = original.map((seeds, team) => {
+      const points = [];
+      const accept = p => {
+        if (!p || points.some(q => Math.abs(q.y - p.y) < 1.8 && Math.hypot(q.x - p.x, q.z - p.z) < 1.15)) return;
+        if (p.distanceToSquared(middle[team]) > p.distanceToSquared(middle[1 - team])) return;
+        points.push(p);
+      };
+      for (const p of seeds) accept(fit(p.x, p.y, p.z));
+      for (let ring = 1; ring <= 10 && points.length < 16; ring++) for (const seed of seeds) {
+        for (let i = 0; i < ring * 8 && points.length < 16; i++) {
+          const a = i / (ring * 8) * TAU, r = ring * 1.35;
+          const p = fit(seed.x + Math.sin(a) * r, seed.y, seed.z + Math.cos(a) * r);
+          if (!p) continue;
+          // Reject a clear pocket on the other side of a spawn-room wall.
+          let clear = true;
+          for (let j = 1, n = Math.ceil(r / .6); j < n; j++) {
+            const k = j / n, x = seed.x + (p.x - seed.x) * k, z = seed.z + (p.z - seed.z) * k;
+            min.set(x - .35, Math.max(seed.y, p.y) + .48, z - .35); max.set(x + .35, Math.max(seed.y, p.y) + 1.72, z + .35);
+            if (world.overlapsAABB(min, max)) { clear = false; break; }
+          }
+          if (clear) accept(p);
+        }
+      }
+      return points;
+    });
+  }
+  return L;
+}
+
+function assemble(scene, world, key, opts) {
   const B = createBuilder(scene, world);
   const team = !!opts.team, arena = !!opts.arena || team;
   const level = key === 'dinghao' ? buildDinghao(B) : key === 'greatwall' ? buildGreatWall(B) : key === 'yuanmingyuan' ? buildYuanmingyuan(B) : key === 'summerpalace' ? buildSummerPalace(B) : key === 'lombard' ? buildLombard(B) : key === 'timesquare' ? buildTimesSquare(B) : key === 'zijingang' ? buildZijingang(B) : key === 'depot' ? buildDepot(B) : key === 'mexico' ? buildMexico(B, arena) : key === 'undercity' ? buildUndercity(B, arena, team) : buildDistrict(B, arena, team);
   return populateMatchSpawns(level, world);
+}
+export function buildLevel(scene, world, key = 'district', opts = {}) {
+  if (!scene) throw new Error('buildLevel needs a scene; use buildCollision for the server path');
+  return assemble(scene, world, key, opts);
+}
+export function buildCollision(world, key = 'district', opts = {}) {
+  return assemble(null, world, key, opts);
 }

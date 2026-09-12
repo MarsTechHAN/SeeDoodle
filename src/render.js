@@ -1,8 +1,8 @@
 // Both looks share one geometry pass. Classic keeps its original pen data; toon adds a surface
 // class to the ink channel and packs full normals so world lighting stays stable while turning.
 import * as THREE from 'three';
-
-export const INK = { BLUE: 0, RED: 1, BLACK: 2, ORANGE: 3, GREEN: 4, PINK: 5, TEAL: 6, VIOLET: 7, BROWN: 8, OLIVE: 9 };
+import { INK } from './ink.js';
+export { INK };
 export const INK_COLORS = [
   new THREE.Vector3(0.10, 0.19, 0.76), // blue ballpoint
   new THREE.Vector3(0.86, 0.12, 0.20), // red pen

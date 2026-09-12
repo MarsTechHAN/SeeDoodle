@@ -18,6 +18,12 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const zlib = require('zlib');
+const { pathToFileURL } = require('url');
+
+// src/wire.js is ESM (the browser loads it natively). The room process is still CJS, so
+// the encoder is imported once at boot and listen() waits on it — no packet can arrive first.
+let wire = null;
+let netsim = null;
 
 const PORT = Number(process.argv[2] || process.env.PORT || 8080);
 // unset means every interface, which is what a LAN game wants. Set it to 127.0.0.1 when something
@@ -25,6 +31,7 @@ const PORT = Number(process.argv[2] || process.env.PORT || 8080);
 const HOST = process.env.HOST || undefined;
 const ROOT = __dirname;
 const MAX_PLAYERS = 32;
+const HARD_MAX = 128;
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no I/O/0/1: they get misread over voice chat
 const MAX_FRAME = 1 << 20;
 const STALL_BYTES = 64 * 1024;   // unsent backlog past which superseded state is dropped, not queued
@@ -125,6 +132,7 @@ class WSConn {
       const body = this.frags.length === 1 ? this.frags[0] : Buffer.concat(this.frags);
       this.frags = [];
       if (this.fragOp === 0x1 && this.onmessage) this.onmessage(body.toString('utf8'));
+      else if (this.fragOp === 0x2 && this.onmessage) this.onmessage(body);
     }
   }
   _readFrame() {
@@ -193,6 +201,10 @@ class WSConn {
     if (droppable && this.pending > STALL_BYTES) { this.dropped++; return; }
     this._write(Buffer.from(str, 'utf8'), 0x1);
   }
+  sendBin(buf, droppable) {
+    if (droppable && this.pending > STALL_BYTES) { this.dropped++; return; }
+    this._write(Buffer.isBuffer(buf) ? buf : Buffer.from(buf), 0x2);
+  }
   close() {
     if (this.closed) return;
     if (this.flushT) { clearImmediate(this.flushT); this.flushT = null; }
@@ -237,7 +249,7 @@ function freeCode() {
 function makeRoom(code, host, { isPublic, name, map, max }) {
   const room = {
     code, codes: new Set([code]), hostId: host.id, isPublic: !!isPublic,
-    members: new Map(), max: Number.isSafeInteger(max) ? Math.min(Math.max(2, max), MAX_PLAYERS) : MAX_PLAYERS,
+    members: new Map(), max: Number.isSafeInteger(max) ? Math.min(Math.max(2, max), HARD_MAX) : MAX_PLAYERS,
     inMatch: false, accepting: true, hostName: name || '', map: map || null,
     mode: null, combat: null, actors: new Map(), bots: new Map(), lobbyBots: new Set(), evictedBots: new Set(), unshielded: new Map(),
   };
@@ -246,13 +258,19 @@ function makeRoom(code, host, { isPublic, name, map, max }) {
 }
 
 function dropRoom(room) {
+  if (netsim) netsim.stopAuth(room);
   for (const c of room.codes) if (rooms.get(c) === room) rooms.delete(c);
 }
 
 function send(client, obj, droppable) { if (client && client.ws && !client.ws.closed) client.ws.send(JSON.stringify(obj), droppable); }
+function sendBin(client, buf, droppable) { if (client && client.ws && !client.ws.closed) client.ws.sendBin(buf, droppable); }
 function toRoom(room, obj, exceptId, droppable) {
   const s = JSON.stringify(obj);
   for (const m of room.members.values()) if (m.id !== exceptId && m.ws && !m.ws.closed) m.ws.send(s, droppable);
+}
+function toRoomBin(room, buf, exceptId, droppable) {
+  const raw = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
+  for (const m of room.members.values()) if (m.id !== exceptId && m.ws && !m.ws.closed) m.ws.sendBin(raw, droppable);
 }
 
 function roomInfo(room) {
@@ -334,7 +352,13 @@ function stall(client) {
 // Both the first socket of a seat and every socket that resumes it come through here, so a resumed
 // player is wired up exactly like a fresh one.
 function bind(ws, client) {
-  ws.onmessage = (raw) => { client.seen = Date.now(); try { onMessage(client, raw); } catch (e) { console.error('message error:', e.message); } };
+  ws.onmessage = (raw) => {
+    client.seen = Date.now();
+    try {
+      if (typeof raw !== 'string') onBinary(client, raw);
+      else onMessage(client, raw);
+    } catch (e) { console.error('message error:', e.message); }
+  };
   ws.onclose = () => {
     if (client.ws !== ws) return;   // a superseded socket of a seat somebody has already resumed
     if (client.gone) return;        // already quiet; the grace timer owns what happens next
@@ -398,11 +422,12 @@ const deny = (r) => { shots.rejected++; shots.why[r] = (shots.why[r] || 0) + 1; 
 
 // The host still owns simulation and objectives. This small roster lets the hit judge enforce
 // team and round boundaries without pretending to run a second copy of the level or the AI.
-const teamMode = (room) => room.mode === 'tdm' || room.mode === 'demolition';
+const teamMode = (room) => room.mode === 'tdm' || room.mode === 'demolition' || room.mode === 'battlefield';
 const combatPhases = new Set(['warmup', 'live', 'roundover', 'over']);
 function clearCombat(room) {
   room.combat = null; room.actors.clear(); room.bots.clear(); room.unshielded.clear();
   for (const member of room.members.values()) { member.grenades.clear(); member.hist.length = 0; member.buckets = {}; }
+  if (netsim) netsim.stopAuth(room);
 }
 function noteLobby(room, d) {
   if (!d || d.players === undefined) return true;
@@ -420,13 +445,14 @@ function noteLobby(room, d) {
   }
   if (room.members.size + bots.size > room.max) return deny('too many participants');
   room.lobbyBots = bots; d.players = rows;
+  if (netsim) netsim.noteLobbyFields(room, d);
   // Two joins can beat the first host reply. Trim retired bots instead of dropping that reply:
   // it may be the only targeted start packet that the first joining player will receive.
   if (Array.isArray(d.combat?.actors)) d.combat = { ...d.combat, actors: d.combat.actors.filter((a) => !(a?.bot === true && room.evictedBots.has(a.id))) };
   return true;
 }
 function noteCombat(room, d) {
-  if (!d || !['tdm', 'demolition'].includes(d.mode) || !Number.isSafeInteger(d.round) || d.round < 0 || !combatPhases.has(d.phase) || !Array.isArray(d.actors) || d.actors.length > room.max) return deny('malformed combat state');
+  if (!d || !['tdm', 'demolition', 'battlefield'].includes(d.mode) || !Number.isSafeInteger(d.round) || d.round < 0 || !combatPhases.has(d.phase) || !Array.isArray(d.actors) || d.actors.length > room.max) return deny('malformed combat state');
   if (room.combat && d.mode === room.mode && d.round < room.combat.round) return deny('stale combat state');
   const actors = new Map(), bots = new Map();
   for (const row of d.actors) {
@@ -457,6 +483,7 @@ function noteCombat(room, d) {
   }
   room.mode = d.mode; room.actors = actors; room.bots = bots; room.lobbyBots = new Set(bots.keys());
   room.combat = { ...d, actors: [...actors.values()] };
+  if (netsim && room._auth) netsim.syncCombat(room);
   return room.combat;
 }
 function sendCombat(room, client) {
@@ -711,6 +738,38 @@ function resolveHit(client, m) {
 }
 
 const HOST_MESSAGES = new Set(['lobby', 'start', 'combatstate', 'end', 'score', 'backtolobby', 'clock', 'botps', 'bothit', 'botnade', 'botdead', 'botshots']);
+const WIRE_STALE = 'reload — the wire format changed';
+
+function onBinary(client, raw) {
+  if (!wire) return;
+  const msg = wire.decodePacket(raw);
+  if (!msg) return;
+  const room = client.room;
+  if (!room) return;
+  const now = Date.now();
+  if (msg.kind === wire.KIND.PS) {
+    if (netsim && netsim.isBattlefield(room)) return;
+    if (!combatMove(room, client, msg.d?.[14], msg.d?.[15])) return;
+    if (!noteMove(client, msg.d, now)) return;
+    if (netsim) netsim.relayPose(room, client, msg.d, { now }, sendBin);
+    else toRoomBin(room, wire.encodePs(msg.d, client.id), client.id, true);
+    return;
+  }
+  if (msg.kind === wire.KIND.BOTPS) {
+    if (client.id !== room.hostId) { deny('botps sent by guest'); return; }
+    const bot = room.bots.get(msg.id);
+    if (bot && !combatMove(room, bot, msg.round, msg.life)) return;
+    if (!bot || !noteMove(bot, msg.ps, now)) { deny('invalid bot position'); return; }
+    if (netsim) netsim.relayPose(room, bot, msg.ps, { now, botId: msg.id, round: msg.round, life: msg.life }, sendBin);
+    else toRoomBin(room, wire.encodeBotPs({ id: msg.id, ps: msg.ps, round: msg.round, life: msg.life }, client.id), client.id, true);
+    return;
+  }
+  if (msg.kind === wire.KIND.INPUT) {
+    if (!netsim || !netsim.isBattlefield(room)) return;
+    netsim.onInput(room, client, msg);
+  }
+}
+
 function onMessage(client, raw) {
   let m;
   try { m = JSON.parse(raw); } catch (e) { return; }
@@ -720,7 +779,7 @@ function onMessage(client, raw) {
   switch (m.t) {
     case 'hello':
       client.name = String(m.name || '').slice(0, 14);
-      send(client, { t: 'hello', id: client.id, max: MAX_PLAYERS, now: Date.now() });
+      send(client, { t: 'hello', id: client.id, max: MAX_PLAYERS, battlefieldMax: HARD_MAX, now: Date.now(), wire: wire.WIRE, path: client.path || 'websocket' });
       break;
 
     case 'name':
@@ -832,6 +891,12 @@ function onMessage(client, raw) {
     // game payload: the server does the routing the host used to do by hand
     case 'm': {
       if (!room) break;
+      if (m.tt === 'ps' || m.tt === 'botps') {
+        deny('json position feed');
+        send(client, { t: 'closed', reason: WIRE_STALE });
+        leaveRoom(client, 'wire');
+        break;
+      }
       if (HOST_MESSAGES.has(m.tt) && client.id !== room.hostId) { deny('host message sent by guest'); break; }
       if (m.tt === 'bdmg') { deny('bdmg sent direct'); break; }
       if (m.tt === 'combatreq') { sendCombat(room, client); break; }
@@ -846,9 +911,18 @@ function onMessage(client, raw) {
         if (!noteLobby(room, m.d)) break;
         const mode = m.d && m.d.mode;
         if (typeof mode === 'string' && mode !== room.mode) { clearCombat(room); room.mode = mode; }
+        if (netsim && room.map) try { netsim.attachMap(room); } catch (e) { console.error('map attach:', e.message); }
       }
       // Targeted late-join starts are snapshots of the current match, not a new match.
-      if (m.tt === 'start' && !m.to && !(m.d && m.d.late)) clearCombat(room);
+      if (m.tt === 'start' && !m.to && !(m.d && m.d.late)) {
+        clearCombat(room);
+        if (netsim && room.mode === 'battlefield') {
+          netsim.startAuth(room);
+          if (!room._authT) room._authT = setInterval(() => {
+            try { netsim.tickRoom(room, { noteMove, sendBin }); } catch (e) { console.error('auth tick:', e.message); }
+          }, 1000 / 30);
+        }
+      }
       if (m.tt === 'combatstate') {
         const state = noteCombat(room, m.d); if (!state) break;
         m.d = state;
@@ -945,18 +1019,23 @@ const server = http.createServer((req, res) => {
   serveStatic(req, res);
 });
 
+function acceptTransport(ws, path) {
+  const client = {
+    id: newId(), ws, name: '', room: null, meta: {}, seen: Date.now(), hist: [], rtt: [], buckets: {},
+    token: crypto.randomBytes(12).toString('base64url'), gone: 0, graceT: null, grenades: new Map(),
+    path: path || 'websocket',
+  };
+  clients.set(client.id, client);
+  bind(ws, client);
+  send(client, { t: 'hello', id: client.id, token: client.token, max: MAX_PLAYERS, battlefieldMax: HARD_MAX, now: Date.now(), wire: wire.WIRE, path: client.path });
+}
+
 server.on('upgrade', (req, socket) => {
   const url = (req.url || '').split('?')[0];
   if (url !== '/ws') { socket.destroy(); return; }
   const ws = handleUpgrade(req, socket);
   if (!ws) return;
-  const client = {
-    id: newId(), ws, name: '', room: null, meta: {}, seen: Date.now(), hist: [], rtt: [], buckets: {},
-    token: crypto.randomBytes(12).toString('base64url'), gone: 0, graceT: null, grenades: new Map(),
-  };
-  clients.set(client.id, client);
-  bind(ws, client);
-  send(client, { t: 'hello', id: client.id, token: client.token, max: MAX_PLAYERS, now: Date.now() });
+  acceptTransport(ws, 'websocket');
 });
 
 // Closing a laptop lid or dropping off the wifi sends no FIN, so TCP alone would hold that player's
@@ -1018,16 +1097,26 @@ function localAddresses() {
   return out.sort((a, b) => (a.family === b.family ? 0 : a.family === 'IPv4' ? -1 : 1));
 }
 
-server.listen(PORT, HOST, () => {
-  const addrs = HOST ? [] : localAddresses();
-  const url = (a) => (a.family === 'IPv6' ? `http://[${a.address}]:${PORT}` : `http://${a.address}:${PORT}`);
-  console.log('\n  Doodle District — LAN server\n');
-  console.log(`  on this machine   http://${HOST && HOST !== '127.0.0.1' ? HOST : 'localhost'}:${PORT}`);
-  if (HOST) console.log(`  (bound to ${HOST} only — reachable through whatever proxies to it)`);
-  else if (!addrs.length) console.log('  (no LAN address found — is this machine on a network?)');
-  for (const a of addrs) console.log(`  on the LAN        ${url(a)}   [${a.iface} ${a.family}]`);
-  console.log('\n  Others open one of the LAN links, or keep their own copy and type');
-  console.log(`  the address into PLAY ONLINE → server. Ctrl+C to stop.\n`);
+import(pathToFileURL(path.join(__dirname, 'src', 'wire.js')).href).then(async (m) => {
+  wire = m;
+  try { netsim = await import(pathToFileURL(path.join(__dirname, 'src', 'netsim.js')).href); }
+  catch (e) { console.error('could not load the sim:', e.message); }
+  server.listen(PORT, HOST, () => {
+    const addrs = HOST ? [] : localAddresses();
+    const url = (a) => (a.family === 'IPv6' ? `http://[${a.address}]:${PORT}` : `http://${a.address}:${PORT}`);
+    console.log('\n  Doodle District — LAN server\n');
+    console.log(`  on this machine   http://${HOST && HOST !== '127.0.0.1' ? HOST : 'localhost'}:${PORT}`);
+    if (HOST) console.log(`  (bound to ${HOST} only — reachable through whatever proxies to it)`);
+    else if (!addrs.length) console.log('  (no LAN address found — is this machine on a network?)');
+    for (const a of addrs) console.log(`  on the LAN        ${url(a)}   [${a.iface} ${a.family}]`);
+    console.log('\n  Others open one of the LAN links, or keep their own copy and type');
+    console.log(`  the address into PLAY ONLINE → server. Ctrl+C to stop.\n`);
+    try { require('./wt-listen')(server, { port: PORT, host: HOST, accept: (ws) => acceptTransport(ws, ws._dgramWriter ? 'webtransport' : 'webtransport-reliable') }); }
+    catch (e) { /* optional native WebTransport — LAN stays WebSocket-only */ }
+  });
+}).catch((e) => {
+  console.error('could not load the wire format:', e.message);
+  process.exit(1);
 });
 
 server.on('error', (e) => {

@@ -16,7 +16,7 @@ export class HUD {
       <div class="hitmarker" id="hitmarker"><i></i><i></i></div>
       <div class="dmg-ind" id="dmg"></div>
       <div class="hud-tl"><div class="score">SCORE <b id="score">0</b></div><div class="combo" id="combo"></div></div>
-      <div class="hud-tr"><div class="wave">WAVE <b id="wave">1</b></div><div class="modifier" id="modifier"></div><div class="left"><b id="left">0</b> enemies left</div><div class="timer" id="timer"></div><div class="weapon-rule" id="weaponrule" hidden></div><div class="pvpscore" id="pvpscore" hidden></div></div>
+      <div class="hud-tr"><div class="wave">WAVE <b id="wave">1</b></div><div class="modifier" id="modifier"></div><div class="left"><b id="left">0</b> enemies left</div><div class="timer" id="timer"></div><div class="netpath" id="netpath"></div><div class="weapon-rule" id="weaponrule" hidden></div><div class="pvpscore" id="pvpscore" hidden></div></div>
       <div class="wayfinder" id="wayfinder" hidden><b id="heading"></b><span id="area"></span><small id="mapkey"></small></div>
       <div class="minimap" id="minimap" hidden><canvas id="minimapcanvas" role="img"></canvas></div>
       <div class="board" id="board" hidden><section class="tactical-map"><h3 id="maptitle"></h3><canvas id="mapcanvas"></canvas><p id="maplegend"></p></section><section class="board-scores" id="boardscores"></section></div>
@@ -34,7 +34,7 @@ export class HUD {
       <div class="screen" id="screen"><div class="panel" id="panel"></div></div>`;
     trDom(root);
     const q = (id) => root.querySelector('#' + id);
-    this.el = { crosshair: q('crosshair'), gret: q('gret'), hitmarker: q('hitmarker'), dmg: q('dmg'), score: q('score'), combo: q('combo'), wave: q('wave'), modifier: q('modifier'), left: q('left'), timer: q('timer'), hpfill: q('hpfill'), hpnum: q('hpnum'), mag: q('mag'), reserve: q('reserve'), reloading: q('reloading'), tally: q('tally'), weapon: q('weapon'), hint: q('hint'), slots: q('slots'), tip: q('tip'), msg: q('msg'), msgsub: q('msgsub'), killfeed: q('killfeed'), screen: q('screen'), panel: q('panel'), nades: q('nades'), scope: q('scope'), focusmark: q('focusmark'), focusmeter: q('focusmeter'), fmfill: q('fmfill'), bossbar: q('bossbar'), bossname: q('bossname'), bossfill: q('bossfill'), pvpscore: q('pvpscore'), board: q('board'), gstam: q('gstam'), gstamfill: q('gstamfill'), cyc: q('cyc'), stam: q('stam'), stamfill: q('stamfill') };
+    this.el = { crosshair: q('crosshair'), gret: q('gret'), hitmarker: q('hitmarker'), dmg: q('dmg'), score: q('score'), combo: q('combo'), wave: q('wave'), modifier: q('modifier'), left: q('left'), timer: q('timer'), netpath: q('netpath'), hpfill: q('hpfill'), hpnum: q('hpnum'), mag: q('mag'), reserve: q('reserve'), reloading: q('reloading'), tally: q('tally'), weapon: q('weapon'), hint: q('hint'), slots: q('slots'), tip: q('tip'), msg: q('msg'), msgsub: q('msgsub'), killfeed: q('killfeed'), screen: q('screen'), panel: q('panel'), nades: q('nades'), scope: q('scope'), focusmark: q('focusmark'), focusmeter: q('focusmeter'), fmfill: q('fmfill'), bossbar: q('bossbar'), bossname: q('bossname'), bossfill: q('bossfill'), pvpscore: q('pvpscore'), board: q('board'), gstam: q('gstam'), gstamfill: q('gstamfill'), cyc: q('cyc'), stam: q('stam'), stamfill: q('stamfill') };
     for (const id of ['nadestate', 'nadelabel', 'nadevalue', 'nadecharge', 'nadehint', 'knifestate', 'knifevalue', 'knifecharge', 'knifehint']) this.el[id] = q(id);
     for (const id of ['wayfinder', 'heading', 'area', 'mapkey', 'maptitle', 'mapcanvas', 'maplegend', 'boardscores', 'minimap', 'minimapcanvas']) this.el[id] = q(id);
     this._msgT = 0; this._scope = false; this._nades = -1; this._pad = false; this.onDevice = null; this._fmShow = false; this._fmFrac = -1; this._fmReady = false; this._lastTally = -1; this._lastSlots = ''; this._ads = false; this._mode = ''; this.onScreenClick = null; this._tipT = 0; this._cycKind = ''; this._cycFrac = -1; this._touch = false; this._stamF = -1;
@@ -258,6 +258,12 @@ export class HUD {
   setWave(n, left) { this.el.wave.textContent = n; this.el.left.textContent = left; }
   setModifier(text) { this.el.modifier.textContent = text ? ts(text) : ''; }
   setTimer(text) { this.el.timer.textContent = text ? ts(text) : ''; }
+  setNetPath(path, rtt) {
+    const el = this.el.netpath; if (!el) return;
+    if (!path || path === 'offline') { el.textContent = ''; return; }
+    const label = path === 'webtransport' ? 'webtransport' : path === 'webtransport-reliable' ? 'webtransport (reliable)' : 'websocket';
+    el.textContent = Number.isFinite(rtt) && rtt > 0 ? ts('{} · {} ms', label, rtt) : label;
+  }
   setScore(score, combo) { this.el.score.textContent = score; this.el.combo.textContent = combo > 1 ? ts('combo x{}', combo) : ''; }
   setWeapon(name, hint) { this.el.weapon.textContent = ts(name); this.el.hint.textContent = hint ? ts(hint) : ''; }
   setWeaponMode(name) { const el = this.root.querySelector('#weaponrule'), text = name ? ts(name) : ''; if (el.textContent !== text) el.textContent = text; el.hidden = !name; }
