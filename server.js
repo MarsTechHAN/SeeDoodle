@@ -393,7 +393,7 @@ const ARMS = {
   katana: { max: 165, base: 55, rate: 3, burst: 4, reach: 4.5 },
   grenadeBash: { max: 55, rate: 3, burst: 4, reach: 4.5 },
   grenade: { max: 93, rate: 1.25, burst: 8, reach: 9.6 * 0.95 },
-  tank: { max: 250, rate: 1 / 1.5, burst: 1, reach: 240, blastR: 4.8 * 0.95 },
+  tank: { max: 250, rate: 1 / 1.5, burst: 1, reach: 240, blastR: 2.88 * 0.95 },
 };
 const shots = { ok: 0, rejected: 0, why: {} };
 const deny = (r) => { shots.rejected++; shots.why[r] = (shots.why[r] || 0) + 1; return false; };

@@ -251,7 +251,7 @@ ctx.tankAimPoint = (origin, dir, range) => {
   for (const hit of [enemy, target]) if (hit && (!nearest || hit.dist < nearest.dist)) nearest = hit;
   return nearest ? nearest.point.clone() : origin.clone().addScaledVector(dir, range);
 };
-const TANK_BLAST_RADIUS = 4.8, TANK_DAMAGE_RADIUS = TANK_BLAST_RADIUS * .95;
+const TANK_BLAST_RADIUS = 2.88, TANK_DAMAGE_RADIUS = TANK_BLAST_RADIUS * .95;
 ctx.fireTankCannon = (event) => {
   const origin = new THREE.Vector3().fromArray(event.pos), dir = new THREE.Vector3().fromArray(event.dir).normalize();
   const wall = world.raycast(origin, dir, 240, SEE_THROUGH), enemy = enemies.raycast(origin, dir, 240), target = ctx.raycastPlayers(origin, dir, 240);
