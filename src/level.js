@@ -3595,30 +3595,36 @@ function addTankEgg(L, scene, world) {
   }
   // A future map edit must never turn the secret into a vehicle embedded in a wall.
   if (!placement) { console.warn(`No clear tank egg location in ${L.key}`); return L; }
-  const group = new THREE.Group(), ink = config.kind === 'bin' || config.kind === 'barrel' ? INK.BLACK : INK.BROWN;
-  const part = (g, color = ink, surface = 'metal') => group.add(new THREE.Mesh(g, makeInkMaterial({ ink: color, surface })));
-  if (config.kind === 'bin') {
-    part(new THREE.CylinderGeometry(.33, .29, .77, 12).translate(0, .42, 0));
-    part(new THREE.CylinderGeometry(.36, .36, .075, 12).translate(0, .06, 0));
-    part(new THREE.CylinderGeometry(.37, .35, .13, 12).translate(0, .845, 0));
-    part(new THREE.BoxGeometry(.32, .065, .19).translate(0, .88, .285), INK.BROWN);
-    const ribs = [];
-    for (let i = 0; i < 10; i++) { const a = i * TAU / 10, g = new THREE.BoxGeometry(.025, .61, .025); g.translate(Math.sin(a) * .328, .43, Math.cos(a) * .328); ribs.push(g); }
-    part(mergeGeometries(ribs, false));
-  } else if (config.kind === 'crate') {
-    part(new THREE.BoxGeometry(.76, .72, .76).translate(0, .36, 0), ink, 'wood');
-    for (const y of [.14, .57]) part(new THREE.BoxGeometry(.8, .09, .8).translate(0, y, 0), INK.BLACK, 'wood');
-    part(new THREE.BoxGeometry(.09, .74, .79).translate(0, .38, 0), ink, 'wood');
-  } else if (config.kind === 'barrel') {
-    part(new THREE.CylinderGeometry(.33, .34, .8, 10).translate(0, .4, 0));
-    for (const y of [.12, .69]) part(new THREE.TorusGeometry(.345, .025, 4, 12).rotateX(Math.PI / 2).translate(0, y, 0), INK.BROWN);
-    part(new THREE.CylinderGeometry(.075, .075, .025, 8).translate(.14, .81, .08));
-  } else {
-    part(new THREE.CylinderGeometry(.32, .21, .53, 12).translate(0, .285, 0), ink, 'ceramic');
-    part(new THREE.TorusGeometry(.325, .042, 5, 12).rotateX(Math.PI / 2).translate(0, .56, 0), ink, 'ceramic');
-    part(new THREE.CylinderGeometry(.29, .29, .025, 12).translate(0, .545, 0), INK.BLACK, 'ground');
+  const ink = config.kind === 'bin' || config.kind === 'barrel' ? INK.BLACK : INK.BROWN;
+  let group = null;
+  // buildCollision passes scene=null so Node can step the same boxes. The egg still
+  // occupies volume; only the ink mesh is a browser thing.
+  if (scene) {
+    group = new THREE.Group();
+    const part = (g, color = ink, surface = 'metal') => group.add(new THREE.Mesh(g, makeInkMaterial({ ink: color, surface })));
+    if (config.kind === 'bin') {
+      part(new THREE.CylinderGeometry(.33, .29, .77, 12).translate(0, .42, 0));
+      part(new THREE.CylinderGeometry(.36, .36, .075, 12).translate(0, .06, 0));
+      part(new THREE.CylinderGeometry(.37, .35, .13, 12).translate(0, .845, 0));
+      part(new THREE.BoxGeometry(.32, .065, .19).translate(0, .88, .285), INK.BROWN);
+      const ribs = [];
+      for (let i = 0; i < 10; i++) { const a = i * TAU / 10, g = new THREE.BoxGeometry(.025, .61, .025); g.translate(Math.sin(a) * .328, .43, Math.cos(a) * .328); ribs.push(g); }
+      part(mergeGeometries(ribs, false));
+    } else if (config.kind === 'crate') {
+      part(new THREE.BoxGeometry(.76, .72, .76).translate(0, .36, 0), ink, 'wood');
+      for (const y of [.14, .57]) part(new THREE.BoxGeometry(.8, .09, .8).translate(0, y, 0), INK.BLACK, 'wood');
+      part(new THREE.BoxGeometry(.09, .74, .79).translate(0, .38, 0), ink, 'wood');
+    } else if (config.kind === 'barrel') {
+      part(new THREE.CylinderGeometry(.33, .34, .8, 10).translate(0, .4, 0));
+      for (const y of [.12, .69]) part(new THREE.TorusGeometry(.345, .025, 4, 12).rotateX(Math.PI / 2).translate(0, y, 0), INK.BROWN);
+      part(new THREE.CylinderGeometry(.075, .075, .025, 8).translate(.14, .81, .08));
+    } else {
+      part(new THREE.CylinderGeometry(.32, .21, .53, 12).translate(0, .285, 0), ink, 'ceramic');
+      part(new THREE.TorusGeometry(.325, .042, 5, 12).rotateX(Math.PI / 2).translate(0, .56, 0), ink, 'ceramic');
+      part(new THREE.CylinderGeometry(.29, .29, .025, 12).translate(0, .545, 0), INK.BLACK, 'ground');
+    }
+    group.position.copy(placement.egg); scene.add(group); L.meshes.push(group);
   }
-  group.position.copy(placement.egg); scene.add(group); L.meshes.push(group);
   const br = { id: L.breakables.length, kind: config.kind === 'bin' ? 'barrel' : config.kind, tankEgg: true, group, hp: 1, pos: placement.egg.clone().add(new THREE.Vector3(0, h / 2, 0)), alive: true, ink, box: null };
   min.set(placement.egg.x - .42, placement.egg.y, placement.egg.z - .42); max.set(placement.egg.x + .42, placement.egg.y + h, placement.egg.z + .42);
   br.box = world.addBox(min, max, { noNav: true, breakable: br }); L.breakables.push(br);
