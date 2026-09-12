@@ -300,12 +300,14 @@ function seatOf(c) {
     host: c.room && c.room.hostId === c.id ? 1 : 0,
     path: c.path, pending: c.ws && !c.ws.closed ? c.ws.pending : -1,
     quiet: Date.now() - (c.seen || 0), why: c.ws?.why || '',
+    mode: c.room?.mode, match: c.room?.inMatch ? 1 : 0,
   };
 }
 
 function leaveRoom(client, reason) {
   const room = client.room;
   if (!room) return;
+  netlog('leave', { ...seatOf(client), reason: reason || 'left', mode: room.mode, match: room.inMatch ? 1 : 0 });
   client.room = null;
   client.grenades.clear();
   room.members.delete(client.id);
@@ -316,6 +318,7 @@ function leaveRoom(client, reason) {
   if (room.hostId === client.id) {
     // promote the longest-standing member rather than dropping everyone's match
     const next = room.members.values().next().value;
+    netlog('host-promote', { from: client.id, to: next.id, code: room.code, mode: room.mode });
     room.hostId = next.id; room.hostName = next.name;
     toRoom(room, { t: 'host', id: next.id, code: room.code });
   }
@@ -361,7 +364,9 @@ function stall(client) {
   const room = client.room;
   if (!room) { clients.delete(client.id); return; }
   client.gone = Date.now();
-  const grace = room.hostId === client.id ? HOST_GRACE_MS : GRACE_MS;
+  // Battlefield movement is already server-owned; promoting the host in 3.5s
+  // just holes the combat clock. Co-op still needs the short fuse.
+  const grace = (room.hostId === client.id && room.mode !== 'battlefield') ? HOST_GRACE_MS : GRACE_MS;
   netlog('stall', { ...seatOf(client), grace });
   toRoom(room, { t: 'stall', id: client.id }, client.id);
   client.graceT = setTimeout(() => {
@@ -493,7 +498,9 @@ function noteCombat(room, d) {
     // A queued host snapshot cannot restore protection already surrendered by firing. Keep this
     // separate from ordinary expiry: warmup -> live legitimately grants the opening protection.
     const forfeited = d.mode === room.mode && room.combat?.round === d.round && room.unshielded.has(row.id) && room.unshielded.get(row.id) === row.life;
-    actors.set(row.id, { ...row, bot, alive: row.alive === true, protectedUntil: !forfeited && Number.isFinite(row.protectedUntil) ? Math.max(0, row.protectedUntil) : 0 });
+    const kept = { ...row, bot, alive: row.alive === true, protectedUntil: !forfeited && Number.isFinite(row.protectedUntil) ? Math.max(0, row.protectedUntil) : 0 };
+    delete kept.ps;
+    actors.set(row.id, kept);
     if (bot) bots.set(row.id, room.bots.get(row.id) || { id: row.id, room, bot: true, hist: [], rtt: [], buckets: {}, grenades: new Map() });
   }
   const fresh = !room.combat || d.mode !== room.mode || d.round !== room.combat.round;
@@ -831,8 +838,27 @@ function resolveHit(client, m) {
 const HOST_MESSAGES = new Set(['lobby', 'start', 'combatstate', 'end', 'score', 'backtolobby', 'clock', 'botps', 'bothit', 'botnade', 'botdead', 'botshots', 'tankstate', 'tankfire']);
 const WIRE_STALE = 'reload — the wire format changed';
 
+function attachAndRelayShots(room, client, d) {
+  if (netsim && room.map) try { netsim.attachMap(room); } catch (e) { /* PVS is optional here */ }
+  const now = Date.now();
+  for (const p of room.members.values()) {
+    if (p.id === client.id || !p.ws || p.ws.closed) continue;
+    const tier = netsim ? netsim.aoiTier(room, p, client, now) : 0;
+    if (tier === (netsim && netsim.TIER_DISTANT)) continue;
+    const payload = tier === 1 ? { k: d && d.k } : d;
+    p.ws.send(JSON.stringify({ t: 'm', tt: 'shots', d: payload, from: client.id }), true);
+  }
+}
+
 function onBinary(client, raw) {
   if (!wire) return;
+  const u8 = raw instanceof Uint8Array ? raw : new Uint8Array(raw.buffer || raw, raw.byteOffset || 0, raw.byteLength || raw.length || 0);
+  if (u8.length >= 2 && u8[0] === wire.MAGIC && u8[1] !== wire.WIRE) {
+    send(client, { t: 'closed', reason: WIRE_STALE });
+    netlog('wire-stale', { ...seatOf(client), got: u8[1], want: wire.WIRE });
+    leaveRoom(client, 'wire');
+    return;
+  }
   const msg = wire.decodePacket(raw);
   if (!msg) return;
   const room = client.room;
@@ -1026,6 +1052,18 @@ function onMessage(client, raw) {
         if (client.id !== room.hostId) send(room.members.get(room.hostId), { t: 'm', tt: 'tankreq', from: client.id, d: m.d });
         break;
       }
+      if (m.tt === 'shots' && netsim) {
+        attachAndRelayShots(room, client, m.d);
+        break;
+      }
+      if (m.tt === 'lift' && netsim && netsim.isBattlefield(room) && room._col?.level?.lifts) {
+        const lift = room._col.level.lifts[m.d?.id];
+        if (lift && Number.isInteger(m.d.floor)) lift.call(m.d.floor);
+      }
+      if (m.tt === 'brk' && netsim && netsim.isBattlefield(room)) {
+        const br = room._col?.level?.breakables?.[m.d?.id];
+        if (br?.alive && br.box) { br.alive = false; room._col.world.removeBox(br.box); }
+      }
       if (m.tt === 'bdmg') { deny('bdmg sent direct'); break; }
       if (m.tt === 'combatreq') { sendCombat(room, client); break; }
       if (m.tt === 'unshield') {
@@ -1047,9 +1085,26 @@ function onMessage(client, raw) {
         if (netsim && room.mode === 'battlefield') {
           try {
             netsim.startAuth(room);
-            if (!room._authT) room._authT = setInterval(() => {
-              try { netsim.tickRoom(room, { noteMove, sendBin }); } catch (e) { console.error('auth tick:', e.message); }
-            }, 1000 / 30);
+            if (!room._authT) {
+              room._authWall = Date.now();
+              room._authDebt = 0;
+              room._authT = setInterval(() => {
+                try {
+                  const now = Date.now();
+                  let dt = (now - room._authWall) / 1000;
+                  room._authWall = now;
+                  if (dt > 0.12) dt = 0.12;
+                  room._authDebt += dt;
+                  const step = 1 / 30;
+                  let n = 0;
+                  while (room._authDebt >= step && n < 4) {
+                    room._authDebt -= step;
+                    n++;
+                    netsim.tickRoom(room, { noteMove, sendBin });
+                  }
+                } catch (e) { console.error('auth tick:', e.message); }
+              }, 1000 / 30);
+            }
           } catch (e) { console.error('auth start:', e.message); }
         }
       }
@@ -1127,7 +1182,18 @@ function onMessage(client, raw) {
 }
 
 // ---------------------------------------------------------------- wiring
+// `/nightly` is a second process behind the same host. nginx may strip the prefix or
+// forward it; either way this process only ever sees the game's own paths.
+function publicPath(url) {
+  let p = (url || '').split('?')[0];
+  if (p === '/nightly') return '/';
+  if (p.startsWith('/nightly/')) return p.slice('/nightly'.length) || '/';
+  return p;
+}
+
 const server = http.createServer((req, res) => {
+  const q = (req.url || '').includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
+  req.url = publicPath(req.url) + q;
   // Same-origin beacon from a tab that just lost its socket. keepalive fetch can still
   // land here after onclose, which is the only way we see the browser's close code.
   if ((req.url || '').split('?')[0] === '/netlog' && req.method === 'POST') {
@@ -1142,7 +1208,9 @@ const server = http.createServer((req, res) => {
           event: String(d.event || '').slice(0, 40),
           id: d.id, code: d.code, path: d.path,
           close: d.close, why: d.reason || d.why, n: d.n,
-          auth: d.authority, match: d.inMatch,
+          auth: d.authority, match: d.inMatch, idle: d.idle, limit: d.limit,
+          got: d.got, want: d.want, seat: d.seat, room: d.room, resuming: d.resuming,
+          clean: d.clean, host: d.host, wait: d.wait,
           ip: req.headers['x-real-ip'] || req.socket.remoteAddress,
         });
       } catch (e) { /* ignore junk */ }
@@ -1182,7 +1250,7 @@ function acceptTransport(ws, path) {
 }
 
 server.on('upgrade', (req, socket) => {
-  const url = (req.url || '').split('?')[0];
+  const url = publicPath(req.url);
   if (url !== '/ws') { socket.destroy(); return; }
   const ws = handleUpgrade(req, socket);
   if (!ws) return;

@@ -9,7 +9,7 @@ import { World } from './physics.js';
 import { buildCollision } from './level.js';
 import { bakePvs, decodePvs, encodePvs, pvsVisible, VISIBLE_R, NEARBY_R, HYSTERESIS_MS, SNAP_BUDGET } from './pvs.js';
 import { step, makeSimPlayer, unpackInputFrame, copyMove, STEP_DT, packInputFrame } from './move.js';
-import { TIER, encodePs, encodeBotPs, encodeNearby, encodeSnap, encodeInput, decodePacket } from './wire.js';
+import { TIER, encodePs, encodeBotPs, encodeNearby, encodeSnap, encodeInput, decodePacket, poseBytes } from './wire.js';
 import { mobOf, diffOf, MOB_FULL } from './settings.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -26,10 +26,12 @@ function mapOpts(room) {
   return { arena: true };
 }
 
-function loadWorld(map, opts) {
+function loadWorld(map, opts, fresh) {
   const key = cacheKey(map, opts);
-  const hit = worlds.get(key);
-  if (hit) return hit;
+  if (!fresh) {
+    const hit = worlds.get(key);
+    if (hit) return hit;
+  }
   const world = new World();
   const level = buildCollision(world, map || 'district', opts);
   world.finalize();
@@ -50,16 +52,19 @@ function loadWorld(map, opts) {
     try { fs.writeFileSync(pvsFile, Buffer.from(encodePvs(pvs))); } catch (e) { /* cache is optional */ }
     console.log(`  PVS ${key}  ${pvs.n} sectors  ${Date.now() - t0}ms`);
   }
-  const bundle = { world, level, pvs, key };
-  worlds.set(key, bundle);
+  const bundle = { world, level, pvs, key, shared: !fresh };
+  if (!fresh) worlds.set(key, bundle);
   return bundle;
 }
 
 export function attachMap(room) {
   const opts = mapOpts(room);
   const key = cacheKey(room.map, opts);
-  if (room._col && room._col.key === key) return room._col;
-  room._col = loadWorld(room.map, opts);
+  // Battlefield ticks doors / lifts / glass. Sharing that world across rooms would
+  // open one match's door in another.
+  const fresh = room.mode === 'battlefield';
+  if (room._col && room._col.key === key && (!fresh || !room._col.shared)) return room._col;
+  room._col = loadWorld(room.map, opts, fresh);
   room._los = room._los || new Map();
   room._nearAt = room._nearAt || new Map();
   room._prio = room._prio || new Map();
@@ -67,7 +72,12 @@ export function attachMap(room) {
   return room._col;
 }
 
-function lastPos(client) {
+function lastPos(client, room) {
+  const sim = room?._auth?.bodies?.get(client.id);
+  if (sim?.body?.pos) {
+    const p = sim.body.pos;
+    return { x: p.x, y: p.y, z: p.z, alive: sim.alive !== false };
+  }
   const h = client?.hist;
   return h && h.length ? h[h.length - 1] : null;
 }
@@ -80,7 +90,7 @@ function losKey(a, b) { return a < b ? a + '>' + b : b + '>' + a; }
 
 function lineOfSight(room, viewer, target, now) {
   const col = room._col; if (!col) return true;
-  const va = lastPos(viewer), vb = lastPos(target); if (!va || !vb) return true;
+  const va = lastPos(viewer, room), vb = lastPos(target, room); if (!va || !vb) return false;
   const key = losKey(viewer.id, target.id);
   const cache = room._los.get(key);
   const same = cache && cache.sx === ((va.x / 16) | 0) && cache.sz === ((va.z / 16) | 0)
@@ -98,8 +108,8 @@ export function aoiTier(room, viewer, target, now) {
   if (!viewer || !target || viewer.id === target.id) return TIER.VISIBLE;
   // Small rooms and co-op: the quadratic term is cheap and the host still owns waves.
   if (room.mode === 'coop' || room.members.size + (room.bots?.size || 0) < 6) return TIER.VISIBLE;
-  const va = lastPos(viewer), vb = lastPos(target);
-  if (!va || !vb) return TIER.VISIBLE;
+  const va = lastPos(viewer, room), vb = lastPos(target, room);
+  if (!va || !vb) return TIER.NEARBY;
   const dx = va.x - vb.x, dz = va.z - vb.z, dy = va.y - vb.y;
   const dist = Math.hypot(dx, dy, dz);
   const mate = teamOf(room, viewer.id) != null && teamOf(room, viewer.id) === teamOf(room, target.id);
@@ -122,7 +132,7 @@ function viewerBudget(room, viewerId, now, add) {
 function priority(room, viewer, target, tier, now) {
   const key = viewer.id + ':' + target.id;
   const acc = room._prio.get(key) || 0;
-  const va = lastPos(viewer), vb = lastPos(target);
+  const va = lastPos(viewer, room), vb = lastPos(target, room);
   const dist = va && vb ? Math.hypot(va.x - vb.x, va.z - vb.z) : 80;
   let w = tier === TIER.VISIBLE ? 3 : 1;
   w += Math.max(0, 1 - dist / VISIBLE_R);
@@ -326,19 +336,31 @@ export function tickRoom(room, helpers) {
     if (!input) continue;
     const ev = step(sim, input, STEP_DT, world, rules);
     if (ev.fell) {
-      const start = actor?.spawn || (room._col.level.playerStart && [room._col.level.playerStart.x, room._col.level.playerStart.y, room._col.level.playerStart.z]);
-      if (start) sim.body.pos.set(start[0], start[1], start[2]);
+      // The client already treats a team-mode fall as a death. Teleporting and
+      // replaying lastInput here left a living body at spawn for the rewind.
+      sim.alive = false;
+      sim.hp = 0;
       sim.body.vel.set(0, 0, 0);
-      sim.hp = Math.max(0, sim.hp - 20);
     }
     if (ev.fallDamage) sim.hp = Math.max(0, sim.hp - ev.fallDamage);
     helpers.noteMove(client, poseOf(sim, { round: room.combat?.round, life: actor?.life }), now);
+  }
+  const L = room._col?.level;
+  if (typeof L?.update === 'function') {
+    const movers = [];
+    for (const sim of room._auth.bodies.values()) if (sim.alive) movers.push(sim);
+    L.update(STEP_DT, { remote: movers, targets: () => movers });
   }
   room._auth.snapAcc += STEP_DT;
   if (room._auth.snapAcc >= 0.05) {
     room._auth.snapAcc -= 0.05;
     sendSnaps(room, helpers, now);
   }
+}
+
+function snapCost(e) {
+  const idn = 1 + Math.min(96, String(e.id || '').length);
+  return idn + 1 + (e.tier === TIER.NEARBY ? 8 : poseBytes(e.d));
 }
 
 function sendSnaps(room, helpers, now) {
@@ -356,14 +378,27 @@ function sendSnaps(room, helpers, now) {
       const pri = priority(room, viewer, src, tier, now);
       list.push({ id, tier, d, pri, src });
     }
-    list.sort((a, b) => b.pri - a.pri);
+    const mine = list.find((e) => e.id === viewer.id);
+    const others = list.filter((e) => e.id !== viewer.id).sort((a, b) => b.pri - a.pri);
     const keep = [];
     let bytes = 40;
-    for (const e of list) {
-      const add = e.tier === TIER.NEARBY ? 16 : 36;
-      if (keep.length && bytes + add > SNAP_BUDGET) continue;
+    if (mine) { keep.push(mine); bytes += snapCost(mine); room._prio.set(viewer.id + ':' + mine.id, 0); }
+    for (const e of others) {
+      if (e.tier === TIER.NEARBY) {
+        const stamp = room._nearAt.get(viewer.id + ':' + e.id) || 0;
+        if (now - stamp < 200) continue;
+      }
+      const add = snapCost(e);
+      if (bytes + add > SNAP_BUDGET) continue;
       keep.push(e); bytes += add;
+      if (e.tier === TIER.NEARBY) room._nearAt.set(viewer.id + ':' + e.id, now);
       room._prio.set(viewer.id + ':' + e.id, 0);
+    }
+    if (now - (room._cullLog || 0) > 4000 && viewer.id === room.hostId) {
+      room._cullLog = now;
+      const vis = list.filter((e) => e.tier === TIER.VISIBLE).length;
+      const near = list.filter((e) => e.tier === TIER.NEARBY).length;
+      console.log('NET cull kept=' + keep.length + ' visible=' + vis + ' nearby=' + near + ' bytes=' + bytes);
     }
     const vSim = auth.bodies.get(viewer.id);
     const buf = encodeSnap(keep, vSim?.lastApplied || 0, tick & 0xffff, vSim?.seq || 0, 0, { starve: !!(vSim && vSim.starve), from: 'server' });

@@ -278,6 +278,7 @@ const DICT = {
     'DEMOLITION': '爆破模式',
     'BATTLEFIELD': '战场',
     'server simulates · 128 players · fog of war': '服务器演算 · 128 人 · 战争迷雾',
+    'up to 128 seats · ~30 visible at 20 Hz': '最多 128 个座位 · 同时可见约 30 人 · 20 Hz',
     '64 per team · server moves you · nearby enemies stay hidden': '每队最多 64 人 · 服务器演算移动 · 墙后的敌人不会发给你',
     '{} · {} ms': '{} · {} 毫秒',
     'BLUE TEAM': '蓝队',

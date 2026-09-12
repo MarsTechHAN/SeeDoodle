@@ -8,6 +8,8 @@ export const WIRE = 1;
 export const MAGIC = 0xD1;
 export const KIND = { PS: 1, BOTPS: 2, NEARBY: 3, INPUT: 4, SNAP: 5 };
 export const TIER = { VISIBLE: 0, NEARBY: 1 };
+// 10 frames was a third of a second and a 64-player hitch would jump the replay.
+export const INPUT_WINDOW = 32;
 
 const te = new TextEncoder();
 const td = new TextDecoder();
@@ -157,7 +159,7 @@ export function readHeader(view, offset) {
 }
 
 export function encodeInput(frames, firstTick, seq, ack, ackBits, from = '') {
-  const n = Math.max(0, Math.min(10, frames.length));
+  const n = Math.max(0, Math.min(INPUT_WINDOW, frames.length));
   const buf = new ArrayBuffer(headerBytes(from) + 8 + 2 + 1 + n * 6);
   const view = new DataView(buf);
   view.setUint8(0, MAGIC); view.setUint8(1, WIRE); view.setUint8(2, KIND.INPUT);
@@ -173,7 +175,7 @@ export function encodeInput(frames, firstTick, seq, ack, ackBits, from = '') {
   return buf;
 }
 
-function poseBytes(d) {
+export function poseBytes(d) {
   const hook = !!(d?.[6] & 128) && d.length >= 14;
   const life = Number.isSafeInteger(d?.[14]) && Number.isSafeInteger(d?.[15]);
   return 21 + (hook ? 6 : 0) + (life ? 4 : 0);
@@ -204,7 +206,7 @@ export function encodeSnap(entities, tick, seq, ack, ackBits, opts = {}) {
       view.setInt16(o, q(e.d[0], 1), true);
       view.setInt16(o + 2, q(e.d[1], 1), true);
       view.setInt16(o + 4, q(e.d[2], 1), true);
-      view.setUint16(o + 6, (e.d[6] || 0) & 0xffff, true);
+      view.setUint16(o + 6, (e.d[6] || 0) & ~(8 | 32) & 0xffff, true);
       o += 8;
     } else {
       o = writePose(view, o, e.d);
@@ -247,7 +249,7 @@ export function decodePacket(buf) {
   if (kind === KIND.INPUT) {
     const h = readHeader(view, fromR.offset);
     const firstTick = view.getUint16(h.offset, true), count = view.getUint8(h.offset + 2);
-    if (count > 10) return null;
+    if (count > INPUT_WINDOW) return null;
     const frames = [];
     let o = h.offset + 3;
     for (let i = 0; i < count; i++) {

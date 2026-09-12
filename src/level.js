@@ -3437,7 +3437,7 @@ function buildDinghao(B) {
             if (this.emptyT > 0.8) { this.state = 'close'; this.t = (1 - this.door) * 0.7; this.emptyT = 0; }
           } else { this.emptyT = 0; this.applyDoors(); }
         }
-        for (const btn of buttons) btn.pad.material = btn.floor === this.target ? lit : dim;
+        if (lit) for (const btn of buttons) btn.pad.material = btn.floor === this.target ? lit : dim;
       },
     };
     for (const btn of buttons) btn.lift = lift;

@@ -270,9 +270,10 @@ export class Player {
       grappleDown: inp.down('grapple'), grapplePressed: !!(inp.pressed('grapple') || latch?.grapple),
     };
     const apply = (stepDt) => step(this, moveIn, stepDt, ctx.world, {
-      mob: this.mob, adsSpeed: opt.adsSpeed, bounds: ctx.level.bounds, fallY: ctx.level.fallY,
+      mob: this.mob, adsSpeed: this._authFixed ? 100 : opt.adsSpeed, bounds: ctx.level.bounds, fallY: ctx.level.fallY,
       conveyors: ctx.level.conveyors, fallDamage: !!ctx.fallDamage?.(), maxSprint: this.maxSprint, diff: this.diff, rings: ctx.level.rings,
-    }, { grapple: (gdt) => this._updateGrapple(gdt) });
+      grappleSim: !!this._authFixed,
+    }, this._authFixed ? {} : { grapple: (gdt) => this._updateGrapple(gdt) });
     let ev = {};
     if (this._authFixed) {
       this._stepAcc = (this._stepAcc || 0) + dt * (this._starve ? 0.9 : 1);

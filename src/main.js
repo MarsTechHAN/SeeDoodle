@@ -17,6 +17,7 @@ import { RemotePlayer, encodeLocal, PLAYER_CAPACITY, validPlayerColor, playerInk
 import { Net } from './net.js';
 import { TeamMatch, isTeamMode, isBattlefield, modeOf, TEAM_COLORS, TEAM_NAMES, teamCap, roomCap } from './match.js';
 import { step as stepMove, packInputFrame, STEP_DT } from './move.js';
+import { INPUT_WINDOW } from './wire.js';
 import { TankSystem } from './tanks.js';
 import { HUD, CONTROLS_HTML } from './hud.js';
 import { isTouchDevice, TouchControls, TOUCH_CONTROLS_HTML } from './touch.js';
@@ -111,9 +112,12 @@ const net = new Net();
 player.onAuthStep = (moveIn) => {
   if (net.authority !== 'server' || !net.connected) return;
   const tick = net._inTick = (net._inTick + 1) & 0xffff;
-  const bits = packInputFrame({ ...moveIn, yaw: player.yaw, pitch: player.pitch, fireDown: player.firing, slot: player.weaponIndex });
-  net._pred.push({ tick, input: { ...moveIn, yaw: player.yaw, pitch: player.pitch }, bits });
-  if (net._pred.length > 10) net._pred.shift();
+  // Send the resulting sprint latch, not the raw button: a gamepad tap would
+  // otherwise look like walking on the server.
+  const frame = { ...moveIn, yaw: player.yaw, pitch: player.pitch, sprintDown: !!player._sprinting, usingGamepad: false };
+  const bits = packInputFrame({ ...frame, fireDown: player.firing, slot: player.weaponIndex });
+  net._pred.push({ tick, input: frame, bits });
+  if (net._pred.length > INPUT_WINDOW) net._pred.shift();
   net.sendInput(net._pred.map((p) => p.bits), net._pred[0].tick);
 };
 const remote = new Map();      // peer id -> RemotePlayer
@@ -838,7 +842,13 @@ function applyAuthority() {
 function broadcastLobby() { syncRoomCap(); net.send('lobby', { players: lobbyRows(), colors: reservedColors(), hostId: net.id, isPublic: lobby.isPublic, map: lobby.map || mapKey, mode: lobby.gameMode, bal: !!lobby.ballistics, fall: !!lobby.fall, diff: ctx.difficulty(), mob: lobby.mob, weaponMode: ctx.weaponMode(), skin: ctx.skin(), tankEggs: ctx.tankEggsEnabled(), shown: net.aliasCode || net.code, max: net.maxPlayers }); renderLobby(); }
 const inMatch = () => ['play', 'dying', 'over'].includes(game.state);
 let boardT = 0;   // seconds since the open scoreboard was last redrawn
-net.onPeerLeave = (id) => { match.removeMember(id); const nm = (lobby.players.get(id) || {}).name; removeRemote(id); broadcastLobby(); if (inMatch()) { hud.kill(t`${nm || ts('someone')} left`, 0); sendScores(); } };
+function peerLeftLine(name, reason) {
+  const nm = name || ts('someone');
+  if (reason === 'connection lost') return t`${nm} lost connection`;
+  if (reason === 'kicked for inactivity' || reason === 'kicked') return t`${nm} left`;
+  return t`${nm} left`;
+}
+net.onPeerLeave = (id, reason) => { match.removeMember(id); const nm = (lobby.players.get(id) || {}).name; removeRemote(id); broadcastLobby(); if (inMatch()) { hud.kill(peerLeftLine(nm, reason), 0); sendScores(); } };
 net.onDisconnect = (reason) => leaveOnline(reason || 'lost the connection to the server');
 // A link going quiet is no longer the end of anybody's match. The server holds the seat for a few
 // seconds while the socket is rebuilt, so the figure stays standing and we just say what happened;
@@ -925,7 +935,7 @@ net.on('lobby', (d, from) => {
   if (inMatch()) { for (const p of d.players) if (!scores.has(p.id)) scores.set(p.id, { name: p.name, kills: 0, deaths: 0 }); refreshScoreHud(); }
   renderLobby();
 });
-net.on('leave', (d) => { const nm = (lobby.players.get(d.id) || {}).name; removeRemote(d.id); if (inMatch()) hud.kill(t`${nm || ts('someone')} left`, 0); renderLobby(); });
+net.on('leave', (d) => { const nm = (lobby.players.get(d.id) || {}).name; removeRemote(d.id); if (inMatch()) hud.kill(peerLeftLine(nm, d.reason), 0); renderLobby(); });
 net.on('start', (d, from) => { if (net.isHost || from !== net.hostId) return; lobby.gameMode = modeOf(d.mode); if (d.players) applyLobbyPlayers(d.players, d.colors); if (d.map) lobby.map = knownMap(d.map); if (d.bal !== undefined) lobby.ballistics = !!d.bal; if (d.fall !== undefined) lobby.fall = !!d.fall; if (d.diff) lobby.diff = d.diff; if (d.mob) lobby.mob = d.mob; lobby.weaponMode = weaponModeOf(d.weaponMode).key; lobby.skin = skinOf(d.skin).key; lobby.tankEggs = d.tankEggs !== false; startMatch(!!d.late, d.spawns ? d.spawns[net.id] : d.spawn, modeOf(d.mode)); if (d.combat && teamMode()) match.receive(d.combat); if (d.late && Array.isArray(d.grenades)) player.syncGrenades(d.grenades); if (d.broken) for (const id of d.broken) { const br = level.breakables[id]; if (br) breakProp(br, null, false, true); } if (d.lifts) for (let i = 0; i < d.lifts.length; i++) level.lifts?.[i]?.snap?.(d.lifts[i]); });
 net.on('startreq', () => { if (net.isHost && game.state === 'lobby') hostStart(); });
 
@@ -1018,7 +1028,7 @@ function applyRemotePose(r, d, nearby) {
   r.lastSeen = performance.now();
 }
 function reconcileLocal(d, tick) {
-  if (!d || !tick) return;
+  if (!d || tick == null) return;
   const err = Math.hypot(player.body.pos.x - d[0], player.body.pos.y - d[1], player.body.pos.z - d[2]);
   net._pred = net._pred.filter((p) => {
     const dlt = (p.tick - tick + 65536) & 0xffff;
@@ -1027,11 +1037,18 @@ function reconcileLocal(d, tick) {
   if (err < 0.12) return;
   player.body.pos.set(d[0], d[1], d[2]);
   if (d.length > 10) player.body.vel.set(d[8], d[9], d[10]);
+  const next = net._pred[0];
+  if (next) {
+    const gap = (next.tick - tick + 65536) & 0xffff;
+    // A hole in the window is a hitch, not a frame we can invent. Snap and wait.
+    if (gap > 1) return;
+  }
   const rules = {
-    mob: player.mob, adsSpeed: player.opt.adsSpeed, bounds: level.bounds, fallY: level.fallY,
+    mob: player.mob, adsSpeed: 100, bounds: level.bounds, fallY: level.fallY,
     conveyors: level.conveyors, fallDamage: !!ctx.fallDamage?.(), maxSprint: player.maxSprint, diff: player.diff, rings: level.rings,
+    grappleSim: true,
   };
-  for (const p of net._pred) stepMove(player, p.input, STEP_DT, world, rules, { grapple: (gdt) => player._updateGrapple(gdt) });
+  for (const p of net._pred) stepMove(player, p.input, STEP_DT, world, rules);
 }
 net.on('ps', (d, from) => { const r = remote.get(from); if (r) { if (teamMode()) { if (d[14] !== match.state?.round || d[15] !== match.actor(from)?.life) return; if (match.actor(from)?.alive === false) { d = [...d]; d[6] &= ~64; } } applyRemotePose(r, d, false); } });
 net.on('nearby', (d, from) => { const r = remote.get(from); if (r) applyRemotePose(r, d, true); });
@@ -1075,8 +1092,17 @@ ctx.pressButton = (btn, local) => {
   if (local && net.active) net.broadcast('lift', { id: btn.lift.id, floor: btn.floor });
 };
 net.on('parry', (d) => { if (teamMode() && d.life != null && (d.round !== match.state?.round || d.life !== match.applied.get(net.id))) return; audio.shieldHit(player.center); input.rumble(0.35, 0.3, 60); effects.strokeBurst(player.eye.clone().addScaledVector(player.forward, 0.5), INK.ORANGE, 8, 5, { life: 0.2, size: 0.03 }); hud.kill(d.ret ? 'RETURN TO SENDER' : 'DEFLECTED', d.ret ? 25 : 0); });
+net.on('idle', (d, from) => {
+  if (!net.isHost) return;
+  const r = remote.get(from); if (!r) return;
+  const idle = (d?.s || 0) > IDLE_FLAG;
+  if (idle && !r.idle) r.idleSince = performance.now() / 1000;
+  if (!idle) r.idleSince = 0;
+  r.idle = idle;
+});
 net.on('shots', (d, from) => {
   const r = remote.get(from); if (!r || !r.root || !r.alive) return;
+  if (!d.b && !d.e) { audio.remoteShot(d.k, r.center); return; }
   const th = TRACER_THICK[d.k] || 0.02;
   if (d.b && d.b.length) {
     // their rounds, flown here for the look of them: they stop at walls and nothing else, because
@@ -1141,8 +1167,14 @@ function netUpdate(dt) {
   idleUpdate(dt);
   if (!net.active) return; const now = performance.now() / 1000; syncTick++;
   for (const r of remote.values()) r.update(dt, now);
+  if (net.authority === 'server' && inMatch()) {
+    for (const r of remote.values()) {
+      if (!r.root || r.viewHidden || r.vehicleHidden || r.away || !r.alive) continue;
+      r.root.visible = !!(r.lastSeen && performance.now() - r.lastSeen < 400);
+    }
+  }
   // a connection that died without saying so leaves a figure standing around: drop anyone silent too long
-  if (inMatch()) for (const [id, r] of remote) {
+  if (inMatch() && net.authority !== 'server') for (const [id, r] of remote) {
     if (r.bot) continue;
     if (!r.lastSeen || performance.now() - r.lastSeen <= 9000) continue;
     if (stalled.has(id)) continue;   // the server says they are coming back; wait for it to say otherwise
@@ -1155,6 +1187,7 @@ function netUpdate(dt) {
   hostQuiet = hostQuiet && !!remote.get(net.hostId) && performance.now() - (remote.get(net.hostId).lastSeen || 0) > 9000;
   if (net.authority === 'server') {
     if (hud.setNetPath) hud.setNetPath(net.path, net.rtt);
+    if (syncTick % 30 === 0 && inMatch()) net.send('idle', { s: input.idleSeconds });
   } else if (syncTick % 3 === 0 && inMatch()) net.send('ps', localSnapshot({ firing: player.firing, idle: input.idleSeconds > IDLE_FLAG }), true);
   if (net.active && hud.setNetPath && syncTick % 15 === 0) hud.setNetPath(net.path, net.rtt);
   if (shotQueue.length) net.broadcast('shots', { k: player.weapon.kind, e: shotQueue.splice(0) });
@@ -1415,7 +1448,7 @@ function modeHTML(sel, canPick) {
   const modes = [
     { key: 'tdm', name: 'TEAM DEATHMATCH', blurb: 'two teams - shared score - respawn at your base' },
     { key: 'demolition', name: 'DEMOLITION', blurb: 'plant at A or B - defuse C4 - one life per round' },
-    { key: 'battlefield', name: 'BATTLEFIELD', blurb: 'server simulates · 128 players · fog of war' },
+    { key: 'battlefield', name: 'BATTLEFIELD', blurb: 'up to 128 seats · ~30 visible at 20 Hz' },
     { key: 'ffa', name: 'FREE FOR ALL', blurb: t`everyone against everyone · first to ${FFA_TARGET}` },
     { key: 'coop', name: 'SQUAD SURVIVAL', blurb: 'all of you against the waves · bigger the squad, bigger the waves' },
   ];
@@ -1601,7 +1634,7 @@ function startMatch(late, spawnIdx, mode = 'ffa') {
   if (teamMode()) { player.regenRate = mode === 'demolition' ? 0 : player.regenRate; if (late) { player.alive = false; game.state = 'dying'; } applyTeams(); }
   else if (isCoop) hud.message('SQUAD SURVIVAL', late ? 'you joined a run in progress' : teamSize() + ' of you against the page · they come harder in a crowd', 3);
   else hud.message('FREE FOR ALL', late ? 'you joined a match in progress' : 'first to ' + FFA_TARGET + ' · ' + Math.round(FFA_TIME / 60) + ' minutes · everyone is fair game', 3);
-  if (isBattlefield(mode)) hud.message('BATTLEFIELD', late ? 'you joined a match in progress' : ts('server simulates · 128 players · fog of war'), 3);
+  if (isBattlefield(mode)) hud.message('BATTLEFIELD', late ? 'you joined a match in progress' : ts('up to 128 seats · ~30 visible at 20 Hz'), 3);
   const rule = weaponModeOf(ctx.weaponMode());
   const mapTip = touchMode || input.usingGamepad ? t`tap <b>${hud.key('score')}</b> for map and scores` : t`hold <b>${hud.key('score')}</b> for map and scores`;
   hud.tip(rule.key === 'normal' ? mapTip : `${ts(rule.name)} · ${ts(rule.blurb)}`, 5);

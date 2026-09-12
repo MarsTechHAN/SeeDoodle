@@ -2,7 +2,6 @@
 // round deadlines and the single bomb; peers restore that complete state when the host changes.
 import * as THREE from 'three';
 import { makeInkMaterial, INK } from './render.js';
-import { encodeLocal } from './players.js';
 import { ArenaBots } from './arena-bots.js';
 import { ts } from './i18n.js';
 
@@ -87,7 +86,13 @@ export class TeamMatch {
     if (!force && this.now() < this.syncAt) return;
     this.syncAt = this.now() + 250;
     this.applyState();
-    for (const a of this.state.actors) { const b = this.body(a.id); if (b && !a.bot && a.alive) { a.hp = b.hp; a.ps = encodeLocal(b, b.weaponIndex, { round: this.state.round, life: a.life }); } }
+    for (const a of this.state.actors) {
+      const b = this.body(a.id);
+      if (b && !a.bot && a.alive) a.hp = b.hp;
+      // Pose belongs on the AoI feed. Stuffing it into this reliable JSON gave every
+      // client a full-precision copy of whoever the host could currently see.
+      a.ps = null;
+    }
     this.net.send('combatstate', this.state);
   }
   receive(d) {

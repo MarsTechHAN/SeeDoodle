@@ -16,7 +16,7 @@ const WIRE_STALE = 'reload — the wire format changed';
 export const makeCode = () => Array.from({ length: 5 }, () => ALPHABET[Math.floor(Math.random() * ALPHABET.length)]).join('');
 
 const DEFAULT_PORT = 8080;
-const OPEN_TIMEOUT = 8000, REQ_TIMEOUT = 12000;
+const OPEN_TIMEOUT = 8000, REQ_TIMEOUT = 12000, RESUME_OPEN_MS = 1500;
 // A socket that closes mid-match is usually the network hiccuping, not the player leaving, so we
 // go back for the seat the server is holding. Rising gaps because the first two attempts cost
 // nothing and a link that is still down after ten seconds is not coming back this second either.
@@ -29,6 +29,9 @@ function mountPrefix() {
   if (typeof location === 'undefined') return '';
   const p = location.pathname;
   return p === '/nightly' || p.startsWith('/nightly/') ? '/nightly' : '';
+}
+function wantWtFirst() {
+  return typeof location !== 'undefined' && /(?:^|[?&])wt=1(?:&|$)/.test(location.search);
 }
 function serverURL() {
   if (typeof location !== 'undefined' && /^https?:$/.test(location.protocol)) {
@@ -227,21 +230,29 @@ export class Net {
     for (const [, w] of this._waits) w.reject(new Error('disconnected from the server'));
     this._waits.clear();
   }
-  async _ensure() {
+  async _ensure(timeout = OPEN_TIMEOUT) {
     if (this.sock && this.sock.readyState === 1) return;
     if (this._opening) return this._opening;
     if (!this.url) this.url = serverURL();
     this._close();
     this._opening = (async () => {
-      // WebSocket first. This page is often behind an nginx TLS terminator that cannot
-      // speak WebTransport; trying WT first either waits 1.5s or, worse, "connects" to
-      // an HTTP/3 edge that is not the room and then looks like a lost server.
+      // WebSocket first unless `?wt=1`. This page is often behind an nginx TLS
+      // terminator that cannot speak WebTransport; trying WT first either waits
+      // 1.5s or, worse, "connects" to an HTTP/3 edge that is not the room.
+      const tryWt = async () => {
+        try {
+          const wt = await this._openWebTransport();
+          if (wt) { this._live(wt, wt.path); return true; }
+        } catch (e) { this._netlog('wt-open-fail', { why: e.message }); }
+        return false;
+      };
+      if (wantWtFirst() && await tryWt()) return;
       let wsErr;
       try {
         await new Promise((resolve, reject) => {
           let sock;
           try { sock = new WebSocket(this.url); } catch (e) { reject(new Error('the server is not reachable')); return; }
-          const timer = setTimeout(() => { try { sock.close(); } catch (e) { /* ignore */ } reject(new Error('the server did not answer')); }, OPEN_TIMEOUT);
+          const timer = setTimeout(() => { try { sock.close(); } catch (e) { /* ignore */ } reject(new Error('the server did not answer')); }, timeout);
           sock.onopen = () => {
             clearTimeout(timer);
             this._live(sock, 'websocket');
@@ -252,13 +263,7 @@ export class Net {
         });
         return;
       } catch (e) { wsErr = e; this._netlog('ws-open-fail', { why: e.message }); }
-      try {
-        const wt = await this._openWebTransport();
-        if (wt) {
-          this._live(wt, wt.path);
-          return;
-        }
-      } catch (e) { /* WS error is the one the player can act on */ }
+      if (!wantWtFirst() && await tryWt()) return;
       throw wsErr || new Error('could not reach the server');
     })().finally(() => { this._opening = null; });
     return this._opening;
@@ -291,7 +296,7 @@ export class Net {
     this._netlog('retry', { n, wait: RETRY_MS[n], seat: seat && seat.id, room: seat && seat.code });
     await new Promise((r) => setTimeout(r, RETRY_MS[n]));
     if (!this.resuming) return;
-    try { await this._ensure(); } catch (e) { this._netlog('retry-open-fail', { n, why: e.message }); this._retry(n + 1); return; }
+    try { await this._ensure(RESUME_OPEN_MS); } catch (e) { this._netlog('retry-open-fail', { n, why: e.message }); this._retry(n + 1); return; }
     if (!this.resuming) return;
     try {
       const res = await this._request({ t: 'resume', id: seat.id, token: seat.token }, 'resume', 6000);
@@ -401,8 +406,8 @@ export class Net {
       case 'gone':
         if (!this.conns.has(m.id)) break;
         this.conns.delete(m.id);
-        if (this.isHost) { if (this.onPeerLeave) this.onPeerLeave(m.id); }
-        else this._emit('leave', { id: m.id });
+        if (this.isHost) { if (this.onPeerLeave) this.onPeerLeave(m.id, m.reason); }
+        else this._emit('leave', { id: m.id, reason: m.reason });
         break;
       case 'host': {
         const wasHost = this.isHost;
