@@ -55,7 +55,7 @@ export class Bullets {
   // Somebody else's rocket flown here for the look of it still has to make a bang -- `mine: false`
   // gives the boom and the shove without letting this machine decide what it killed.
   _detonate(b, point) {
-    this.ctx.player.explode(point, { R: b.blastR, enemyDmg: b.blastDmg, mine: !b.cosmetic, selfDamage: !b.invalidMatchLife, lift: 0, push: 11, selfBase: 12, selfMax: 58, pvpBase: 25, pvpMax: 115 });
+    this.ctx.player.explode(point, { source: 'rocket', R: b.blastR, enemyDmg: b.blastDmg, mine: !b.cosmetic, selfDamage: !b.invalidMatchLife, lift: 0, push: 11, selfBase: 12, selfMax: 58, pvpBase: 25, pvpMax: 115 });
   }
   update(dt) {
     const ctx = this.ctx, world = ctx.world, list = this.list;
@@ -76,6 +76,8 @@ export class Bullets {
         // and one that lands at your feet do the same thing.
         const hw = world.raycast(b.prev, _d, len, SEE_THROUGH);
         let best = hw ? { d: hw.dist, p: hw.point } : null;
+        const ht = ctx.tanks?.raycast(b.prev, _d, len);
+        if (ht && (!best || ht.dist < best.d)) best = { d: ht.dist, p: ht.point };
         if (!b.cosmetic) {
           const he = ctx.enemies.raycast(b.prev, _d, len);
           if (he && (!best || he.dist < best.d)) best = { d: he.dist, p: he.point };

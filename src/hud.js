@@ -19,6 +19,7 @@ export class HUD {
       <div class="hud-tr"><div class="wave">WAVE <b id="wave">1</b></div><div class="modifier" id="modifier"></div><div class="left"><b id="left">0</b> enemies left</div><div class="timer" id="timer"></div><div class="weapon-rule" id="weaponrule" hidden></div><div class="pvpscore" id="pvpscore" hidden></div></div>
       <div class="wayfinder" id="wayfinder" hidden><b id="heading"></b><span id="area"></span><small id="mapkey"></small></div>
       <div class="minimap" id="minimap" hidden><canvas id="minimapcanvas" role="img"></canvas></div>
+      <div class="tank-hud" id="tankhud" hidden><div class="tank-readout"><span id="tanklabel"></span><b id="tankhp"></b></div><div class="tank-health"><i id="tankhealth"></i></div><small id="tankdetail"></small><small id="tankhint"></small><div class="tank-progress" id="tankprogress" hidden><i id="tankprogressfill"></i></div></div>
       <div class="board" id="board" hidden><section class="tactical-map"><h3 id="maptitle"></h3><canvas id="mapcanvas"></canvas><p id="maplegend"></p></section><section class="board-scores" id="boardscores"></section></div>
       <div class="bossbar" id="bossbar"><div class="bossname" id="bossname"></div><div class="bar big"><div class="fill red" id="bossfill"></div></div></div>
       <div class="hud-bl">
@@ -37,6 +38,7 @@ export class HUD {
     this.el = { crosshair: q('crosshair'), gret: q('gret'), hitmarker: q('hitmarker'), dmg: q('dmg'), score: q('score'), combo: q('combo'), wave: q('wave'), modifier: q('modifier'), left: q('left'), timer: q('timer'), hpfill: q('hpfill'), hpnum: q('hpnum'), mag: q('mag'), reserve: q('reserve'), reloading: q('reloading'), tally: q('tally'), weapon: q('weapon'), hint: q('hint'), slots: q('slots'), tip: q('tip'), msg: q('msg'), msgsub: q('msgsub'), killfeed: q('killfeed'), screen: q('screen'), panel: q('panel'), nades: q('nades'), scope: q('scope'), focusmark: q('focusmark'), focusmeter: q('focusmeter'), fmfill: q('fmfill'), bossbar: q('bossbar'), bossname: q('bossname'), bossfill: q('bossfill'), pvpscore: q('pvpscore'), board: q('board'), gstam: q('gstam'), gstamfill: q('gstamfill'), cyc: q('cyc'), stam: q('stam'), stamfill: q('stamfill') };
     for (const id of ['nadestate', 'nadelabel', 'nadevalue', 'nadecharge', 'nadehint', 'knifestate', 'knifevalue', 'knifecharge', 'knifehint']) this.el[id] = q(id);
     for (const id of ['wayfinder', 'heading', 'area', 'mapkey', 'maptitle', 'mapcanvas', 'maplegend', 'boardscores', 'minimap', 'minimapcanvas']) this.el[id] = q(id);
+    for (const id of ['tankhud', 'tanklabel', 'tankhp', 'tankhealth', 'tankdetail', 'tankhint', 'tankprogress', 'tankprogressfill']) this.el[id] = q(id);
     this._msgT = 0; this._scope = false; this._nades = -1; this._pad = false; this.onDevice = null; this._fmShow = false; this._fmFrac = -1; this._fmReady = false; this._lastTally = -1; this._lastSlots = ''; this._ads = false; this._mode = ''; this.onScreenClick = null; this._tipT = 0; this._cycKind = ''; this._cycFrac = -1; this._touch = false; this._stamF = -1;
     this.el.screen.addEventListener('click', () => { if (this.onScreenClick) this.onScreenClick(); });
   }
@@ -139,9 +141,28 @@ export class HUD {
   }
   setBoard(html, mapOnly = false) {
     const on = !!html || mapOnly; this.el.board.hidden = !on; this.root.classList.toggle('board-open', on);
+    if (on) this.el.tankhud.hidden = true;
     this.el.board.classList.toggle('map-only', mapOnly); this.el.boardscores.hidden = mapOnly;
     if (on && html !== this._boardHTML) { this._boardHTML = html; this.el.boardscores.innerHTML = html || ''; trDom(this.el.boardscores); }
     if (!on) this._mapDrawAt = 0;
+  }
+  setTank(status) {
+    const el = this.el, driving = !!status?.driving;
+    const visible = !!status && status.visible !== false && !this.root.classList.contains('nogame') && !el.screen.classList.contains('show') && el.board.hidden;
+    el.tankhud.hidden = !visible; this.root.classList.toggle('tank-driving', driving);
+    if (!visible) return;
+    const action = Object.hasOwn(status, 'action') ? status.action : driving ? 'exit' : status.canPull ? 'hijack' : status.canEnter ? 'enter' : null;
+    const maxHp = Math.max(1, Number(status.maxHp) || 88888), hp = Math.max(0, Math.min(maxHp, Number(status.hp) || 0));
+    const progress = Math.max(0, Math.min(1, Number(status.progress) || 0)), cooldown = Math.max(0, Number(status.cooldown) || 0);
+    const text = (node, value) => { if (node.textContent !== value) node.textContent = value; };
+    text(el.tanklabel, ts('TANK')); text(el.tankhp, `${Math.ceil(hp)} / ${maxHp}`);
+    el.tankhealth.style.width = (hp / maxHp * 100).toFixed(1) + '%';
+    const speed = ts('{} km/h', Math.round(Math.abs(Number(status.speed) || 0) * 3.6));
+    text(el.tankdetail, driving ? `${speed} - ${cooldown > 0 ? ts('CANNON {} s', cooldown.toFixed(1)) : ts('CANNON READY')}` : ts(status.stopped ? 'STOPPED' : 'MOVING'));
+    const brake = this._touch ? ts('BRAKE') : this.key('jump');
+    const hint = action === 'hijack' ? ts('Hold {}: pull driver out', this.key('vehicle')) : action === 'enter' ? ts('{}: enter tank', this.key('vehicle')) : driving ? action === 'exit' ? ts('{}: brake - {}: exit', brake, this.key('vehicle')) : ts('{}: brake before exiting', brake) : ts('Wait for the tank to stop');
+    text(el.tankhint, hint);
+    el.tankprogress.hidden = action !== 'hijack' || progress <= 0; el.tankprogressfill.style.width = (progress * 100).toFixed(1) + '%';
   }
   scrollBoard(event) {
     if (this.el.board.hidden) return false;
@@ -269,17 +290,17 @@ export class HUD {
     setTimeout(() => d.remove(), 1700); while (this.el.killfeed.children.length > 6) this.el.killfeed.firstChild.remove();
   }
   damageFrom(angle) { const i = document.createElement('i'); i.style.transform = `rotate(${(angle * 180 / Math.PI).toFixed(1)}deg)`; this.el.dmg.appendChild(i); setTimeout(() => i.remove(), 1000); }
-  showScreen(html) { this.el.screen.inert = false; this.el.panel.innerHTML = html; trDom(this.el.panel); this.el.screen.classList.add('show'); this.el.nadestate.hidden = true; this.el.knifestate.hidden = true; this.el.minimap.hidden = true; this.root.classList.remove('minimap-on'); }
+  showScreen(html) { this.el.screen.inert = false; this.el.panel.innerHTML = html; trDom(this.el.panel); this.el.screen.classList.add('show'); this.el.nadestate.hidden = true; this.el.knifestate.hidden = true; this.el.minimap.hidden = true; this.setTank(null); this.root.classList.remove('minimap-on'); }
   hideScreen() { if (this.el.screen.contains(document.activeElement)) document.activeElement.blur(); this.el.screen.inert = true; this.el.screen.classList.remove('show'); }
-  setGameplayVisible(v) { this.root.classList.toggle('nogame', !v); }
+  setGameplayVisible(v) { this.root.classList.toggle('nogame', !v); if (!v) this.setTank(null); }
   update(dt) {
     if (this._msgT > 0) { this._msgT -= dt; if (this._msgT <= 0) { this.el.msg.classList.remove('show'); this.el.msgsub.textContent = ''; } }
     if (this._tipT > 0) { this._tipT -= dt; if (this._tipT <= 0) this.el.tip.classList.remove('show'); }
   }
 }
 
-export const KB_KEYS = { fire: 'LMB', aim: 'RMB', block: 'RMB', jump: 'Space', sprint: 'Shift', slide: 'C', dash: 'C', grapple: 'Q', melee: 'F', reload: 'R', grenade: 'G', focus: 'both mouse buttons (or X)', next: 'wheel', pause: 'Esc', confirm: 'Space', score: 'Tab', nadePin: 'R', nadeCancel: 'RMB / V', interact: 'B', bombDrop: 'N' };
-export const PAD_KEYS = { fire: 'R2', aim: 'L2', block: 'L2', jump: '✕', sprint: 'L3', slide: '○', dash: '○', grapple: 'L1', melee: 'R1', reload: '□', grenade: 'R3', focus: 'L2 + R2', next: '△', pause: 'Options', confirm: '✕', score: 'Create', nadePin: '□', nadeCancel: 'L2 / R1', interact: 'D-pad down', bombDrop: 'N' };
+export const KB_KEYS = { fire: 'LMB', aim: 'RMB', block: 'RMB', jump: 'Space', sprint: 'Shift', slide: 'C', dash: 'C', grapple: 'Q', melee: 'F', reload: 'R', grenade: 'G', focus: 'both mouse buttons (or X)', next: 'wheel', pause: 'Esc', confirm: 'Space', score: 'Tab', nadePin: 'R', nadeCancel: 'RMB / V', interact: 'B', bombDrop: 'N', vehicle: 'H' };
+export const PAD_KEYS = { fire: 'R2', aim: 'L2', block: 'L2', jump: '✕', sprint: 'L3', slide: '○', dash: '○', grapple: 'L1', melee: 'R1', reload: '□', grenade: 'R3', focus: 'L2 + R2', next: '△', pause: 'Options', confirm: '✕', score: 'Create', nadePin: '□', nadeCancel: 'L2 / R1', interact: 'D-pad down', bombDrop: 'N', vehicle: 'D-pad right' };
 export const CONTROLS_HTML = `
 <div class="cols">
   <div><div class="colhead">MOUSE + KEYBOARD</div>
@@ -299,6 +320,8 @@ export const CONTROLS_HTML = `
     <div><b>Tab</b> hold for map and scores; wheel scrolls players &nbsp; <b>Esc</b> pause</div>
     <div><b>Both mouse buttons</b> dash-slash once the gauge is lit</div>
     <div><b>1-4 / wheel</b> rifle · shotgun · sniper · katana</div>
+    <div><b>H</b> tank: enter / exit; hold beside a stopped tank to pull the driver out</div>
+    <div><b>Space</b> tank brake; movement steers and fire shoots the cannon</div>
   </div>
   <div><div class="colhead">PS5 CONTROLLER</div>
     <div><b>L stick</b> move &nbsp; <b>R stick</b> look &nbsp; <b>L3</b> sprint</div>
@@ -315,5 +338,7 @@ export const CONTROLS_HTML = `
     <div><b>Full charge</b> stays safe by default; automatic pin pull is optional in settings</div>
     <div><b>L2 / R1</b> cancels or drops the grenade</div>
     <div><b>Create</b> toggle map and scores &nbsp; <b>Options</b> pause</div>
+    <div><b>D-pad right</b> tank: enter / exit; hold beside a stopped tank to pull the driver out</div>
+    <div><b>✕</b> tank brake; movement steers and fire shoots the cannon</div>
   </div>
 </div>`;

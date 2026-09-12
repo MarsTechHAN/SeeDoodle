@@ -208,6 +208,11 @@ export class ArenaBots {
     const match = this.match, actor = match.actor(shot.id);
     if (!match.net.isHost || match.state?.round !== shot.round || !match.canFight() || !actor?.alive || actor.life !== shot.life) return { stopped: true, hit: false };
     const wall = this.ctx.world.raycast(origin, dir, range, SEE_THROUGH), hit = this._rifleHit(origin, dir, range, shot);
+    const hull = this.ctx.tanks?.raycast(origin, dir, range);
+    if (hull && (!wall || wall.box.data.tankHull || hull.dist < wall.dist) && (!hit || hull.dist <= hit.dist)) {
+      this.ctx.tanks.hit(19, { source: 'rifle', owner: shot.id, point: hull.point, origin: muzzle, dir, round: shot.round, life: shot.life });
+      return { stopped: true, hit: true };
+    }
     if (wall && (!hit || wall.dist <= hit.dist)) { this.ctx.effects.bulletImpact(wall.point, wall.normal, shot.ink); return { stopped: true, hit: false }; }
     if (!hit) return { stopped: false, hit: false };
     if (hit.part === 'blade') { this._guardFeedback(hit.actor, muzzle, false, shot.id); return { stopped: true, hit: false }; }
@@ -234,7 +239,8 @@ export class ArenaBots {
       sim.chargeAt = null; sim.fireAt = now + 750;
       this._visualShot(actor, sim, 'katana', sim.eye, aim, now);
       if (distance < 3.2) {
-        if (this._parries(target, sim.eye)) { this._guardFeedback(target, sim.eye, true, actor.id); sim.fireAt = now + 900; }
+        if (this.ctx.tanks?.occupied(target.id)) this.ctx.tanks.hit(165, { source: 'katana', owner: actor.id, point: aim, origin: sim.eye, dir: delta, charge: 1, round: this.match.state.round, life: actor.life });
+        else if (this._parries(target, sim.eye)) { this._guardFeedback(target, sim.eye, true, actor.id); sim.fireAt = now + 900; }
         else this.match.net.send('bothit', { id: actor.id, to: target.id, k: 'katana', charge: 1, dmg: 165, round: this.match.state.round, life: actor.life, targetLife: target.life });
       }
       return;

@@ -7,15 +7,18 @@ const _min = new THREE.Vector3(), _max = new THREE.Vector3(), _out = [];
 
 export class World {
   constructor(cell = 8) {
-    this.boxes = []; this.cell = cell; this.grid = new Map(); this._qid = 0;
+    this.boxes = []; this.dynamicBoxes = []; this.cell = cell; this.grid = new Map(); this._qid = 0;
     this.bounds = { min: new THREE.Vector3(-60, -20, -60), max: new THREE.Vector3(60, 80, 60) };
   }
   // wipe the world so a different map can be built into the same instance
-  clear() { this.boxes.length = 0; this.grid.clear(); this._qid = 0; }
+  clear() { this.boxes.length = 0; this.dynamicBoxes.length = 0; this.grid.clear(); this._qid = 0; }
   addBox(min, max, data = {}) {
     const b = { min: { x: min.x, y: min.y, z: min.z }, max: { x: max.x, y: max.y, z: max.z }, data, id: this.boxes.length, _q: -1 };
     this.boxes.push(b); return b;
   }
+  // A small number of vehicles move outside the static map's spatial index.
+  addDynamicBox(min, max, data = {}) { const b = { min: { ...min }, max: { ...max }, data }; this.dynamicBoxes.push(b); return b; }
+  removeDynamicBox(b) { const i = this.dynamicBoxes.indexOf(b); if (i >= 0) this.dynamicBoxes.splice(i, 1); }
   finalize() { this.grid.clear(); for (const b of this.boxes) this._insert(b); }
   removeBox(b) { const i = this.boxes.indexOf(b); if (i < 0) return; this.boxes.splice(i, 1); this.finalize(); }
   _key(ix, iz) { return (ix + 4096) * 8192 + (iz + 4096); }
@@ -37,6 +40,7 @@ export class World {
         if (b.min.x < max.x && b.max.x > min.x && b.min.y < max.y && b.max.y > min.y && b.min.z < max.z && b.max.z > min.z) out.push(b);
       }
     }
+    for (const b of this.dynamicBoxes) if (!b.data.disabled && b.min.x < max.x && b.max.x > min.x && b.min.y < max.y && b.max.y > min.y && b.min.z < max.z && b.max.z > min.z) out.push(b);
     return out;
   }
   overlapsAABB(min, max) { return this.query(min, max, _out).length > 0; }
@@ -131,8 +135,8 @@ export class World {
   raycast(o, d, maxDist = 1000, ignore = null) {
     let best = null, bestT = maxDist, bAxis = -1, bSign = 0;
     const boxes = this.boxes;
-    for (let i = 0; i < boxes.length; i++) {
-      const b = boxes[i]; if (ignore && ignore(b)) continue;
+    for (let i = 0; i < boxes.length + this.dynamicBoxes.length; i++) {
+      const b = i < boxes.length ? boxes[i] : this.dynamicBoxes[i - boxes.length]; if (b.data.disabled || (ignore && ignore(b))) continue;
       let tmin = 0, tmax = bestT, nAxis = -1, nSign = 0, ok = true;
       for (let a = 0; a < 3; a++) {
         const ax = AX[a]; const da = d[ax], oa = o[ax];

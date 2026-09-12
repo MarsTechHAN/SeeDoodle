@@ -4,7 +4,7 @@
 // and hits between players are judged by the server with the latency rewound out of them.
 import * as THREE from 'three';
 import { InkRenderer, INK, makeInkMaterial } from './render.js';
-import { World } from './physics.js';
+import { World, SEE_THROUGH } from './physics.js';
 import { Input } from './input.js';
 import { buildLevel, LEVELS } from './level.js';
 import { NavGrid } from './nav.js';
@@ -15,6 +15,7 @@ import { Bullets } from './bullets.js';
 import { RemotePlayer, encodeLocal, PLAYER_CAPACITY, validPlayerColor, playerInk, playerColorCSS } from './players.js';
 import { Net } from './net.js';
 import { TeamMatch, isTeamMode, modeOf, TEAM_COLORS, TEAM_NAMES } from './match.js';
+import { TankSystem } from './tanks.js';
 import { HUD, CONTROLS_HTML } from './hud.js';
 import { isTouchDevice, TouchControls, TOUCH_CONTROLS_HTML } from './touch.js';
 import { t, ts, trDom, getLang, setLang, LANGS } from './i18n.js';
@@ -49,6 +50,7 @@ function setLevel(key, on, force = false, team = false) {
   level.animated.length = 0; world.clear();
   level = buildLevel(R.scene, world, key, { arena: on, team }); nav = new NavGrid(world, level.bounds, level.navCell || 1).build();
   ctx.level = level; ctx.nav = nav; if (window.__game) { window.__game.level = level; window.__game.nav = nav; }
+  ctx.tanks?.reset();
   R.setMap?.(key);
   R.setLevelGeometry?.(level);
   for (const m of level.meshes) if (m.userData.skin) m.visible = m.userData.skin === ctx.skin();
@@ -108,14 +110,15 @@ ctx.grenadeOwnerPos = (id) => {
   const r = remote.get(id); if (!r || !r.alive) return null;
   return r.center.clone().add(new THREE.Vector3(0, 0.35, 0));
 };
-input.onControlCancel = () => { player.cancelGrenade?.(); player.cancelKnife?.(); boardToggle = false; };
+input.onControlCancel = () => { player.cancelGrenade?.(); player.cancelKnife?.(); ctx.tanks?.cancelInput(); boardToggle = false; };
 const lobby = { players: new Map(), hostId: null, isPublic: true, status: '', code: '', map: null, gameMode: 'ffa', ballistics: false, diff: 'easy', mob: 'mid', weaponMode: 'normal', skin: 'classic' };
 const colorSeats = new Map(); // recently departed ids -> { color, until }, shared with the next host
 const scores = new Map();      // peer id -> { name, kills, deaths }
 let screen = 'main';           // which start-screen panel is showing: main | online | lobby
 ctx.touch = touch;
-const match = ctx.match = new TeamMatch(ctx, { net, lobby, remote, scores, sendScores, endMatch, clearRound: () => localNadeAnnouncements.clear() });
-window.__game = { ctx, game, player, enemies, nav, world, level, hud, effects, input, net, remote, lobby, scores, match };
+const match = ctx.match = new TeamMatch(ctx, { net, lobby, remote, scores, sendScores, endMatch, clearRound: () => { localNadeAnnouncements.clear(); ctx.tanks?.reset(); } });
+const tanks = ctx.tanks = new TankSystem(ctx, { net, remote, match, lobby });
+window.__game = { ctx, game, player, enemies, nav, world, level, hud, effects, input, net, remote, lobby, scores, match, tanks };
 function localSnapshot(extra = {}) { return encodeLocal(player, player.weaponIndex, { ...extra, ...(teamMode() ? { round: match.state?.round, life: match.applied.get(net.id) } : {}) }); }
 function combatClaim(target, owner = net.id, life = match.actor(owner)?.life) { return teamMode() ? { round: match.state?.round, life, targetLife: match.actor(target)?.life } : {}; }
 
@@ -139,7 +142,7 @@ function applyRules() { player.applyDifficulty(ctx.difficulty()); player.applyMo
 // anything a bullet or a blade can hit besides enemies
 ctx.targets = () => [player, ...remote.values()];
 // co-op is one team: your shots pass through your friends and only the enemies bleed
-ctx.canHurt = (t) => versus() && t !== player && (!teamMode() || match.canHurt(ctx.currentGrenadeOwner || net.id, t.id));
+ctx.canHurt = (t) => versus() && t !== player && !tanks.occupied(t.id) && (!teamMode() || match.canHurt(ctx.currentGrenadeOwner || net.id, t.id));
 ctx.combatInputAllowed = () => !teamMode() || (match.canFight() && !(input.down('interact') && match.actionFor(net.id) && !input.move.x && !input.move.y));
 ctx.raycastPlayers = (o, d, maxDist) => {
   let best = null;
@@ -187,6 +190,7 @@ ctx.hitPlayer = (t, dmg, info) => {
   // that player back to where our screen had them and decides. Send the ray we actually fired so
   // there is something to check it against; the katana has no ray, only a reach.
   const claim = { k: info.source, dmg: Math.round(dmg), crit: !!info.crit, part: info.part || null };
+  if (info.source === 'tank') { claim.sid = info.sid; claim.epoch = info.epoch; }
   if (info.source === 'katana' && Number.isFinite(info.charge)) claim.charge = clamp(info.charge, 0, 1);
   if (info.tof > 0 && info.muzzle) {
     // A round that fell on the way there did not travel in a straight line, so there is no ray to
@@ -223,11 +227,33 @@ ctx.cutRopes = (eye, dir, range) => {
 const _v = new THREE.Vector3();
 // breakable props: bullets, blades and blasts break them, and everyone in a match sees it go
 ctx.breakHit = (br, dmg, point, dir) => {
+  if (br.tankEgg) { if (br.alive) tanks.hitEgg(br); return; }
   if (!br.alive) return; br.hp -= dmg;
   if (br.hp <= 0) breakProp(br, dir, true); else { effects.strokeBurst(point, br.ink, 5, 4, { life: 0.2, size: 0.03 }); audio.shieldHit(point); }
 };
 ctx.breakablesInArc = (pos, dir, range, cosHalf) => level.breakables.filter((br) => { if (!br.alive) return false; _v.subVectors(br.pos, pos); const d = _v.length(); return d < range + 0.5 && (d < 0.4 || _v.divideScalar(d).dot(dir) > cosHalf); });
-ctx.blastBreakables = (c, R) => { for (const br of level.breakables) if (br.alive && br.pos.distanceTo(c) < R * 0.9) breakProp(br, br.pos.clone().sub(c).normalize(), true); };
+ctx.blastBreakables = (c, R) => { for (const br of level.breakables) if (br.alive && br.pos.distanceTo(c) < R * 0.9) { if (br.tankEgg) tanks.hitEgg(br); else breakProp(br, br.pos.clone().sub(c).normalize(), true); } };
+ctx.breakTankEgg = (br) => breakProp(br, null, net.isHost);
+ctx.onTankEnter = (id) => { if (game.mode === 'demolition' && net.isHost) match.dropBomb(id); };
+ctx.forceTankDeath = (by) => {
+  if (!player.alive || game.state !== 'play') return;
+  player.lastHitBy = by || null; player.lastHit = { from: player.center.toArray(), crit: false, amount: player.hp, src: 'tank' };
+  player.hp = 0; player.shieldT = 0; player.die();
+};
+ctx.fireTankCannon = (event) => {
+  const origin = new THREE.Vector3().fromArray(event.pos), dir = new THREE.Vector3().fromArray(event.dir).normalize();
+  const wall = world.raycast(origin, dir, 240, SEE_THROUGH), enemy = enemies.raycast(origin, dir, 240), target = ctx.raycastPlayers(origin, dir, 240);
+  let dist = wall?.dist ?? 240, end = wall?.point ?? origin.clone().addScaledVector(dir, 240), hit = null;
+  if (enemy && enemy.dist < dist) { dist = enemy.dist; end = enemy.point; hit = { enemy }; }
+  if (target && target.dist < dist) { dist = target.dist; end = target.point; hit = { target }; }
+  effects.tracer(origin, end, INK.ORANGE, .14, .2); effects.boom(end, 2.1); audio.explosion(end);
+  if (event.driver !== ctx.localPlayerId() || !player.alive || game.state !== 'play') return;
+  player.shieldT = 0; player.firing = true;
+  const info = { point: end, dir, part: 'torso', source: 'tank', crit: false, dist, sid: event.serial, epoch: event.epoch };
+  if (hit?.target) ctx.hitPlayer(hit.target.player, 250, info);
+  else if (hit?.enemy) enemies.damage(hit.enemy.enemy, 250, info);
+  else if (wall?.box.data.breakable) ctx.breakHit(wall.box.data.breakable, 250, end, dir);
+};
 function breakProp(br, dir, local, quiet = false) {
   if (!br.alive) return; br.alive = false; world.removeBox(br.box);
   const g = br.group, pos = br.pos; const d = dir && dir.lengthSq() > 0.01 ? dir.clone().normalize() : new THREE.Vector3(rand(-1, 1), 1, rand(-1, 1)).normalize();
@@ -577,7 +603,7 @@ function updateFocus(dt) {
 }
 
 // ---------------- free for all: spawning, death, scoring ----------------
-const HOW = { rifle: 'rifle', shotgun: 'shotgun', sniper: 'sniper', katana: 'katana', grenade: 'grenade', deflect: 'their own bullet' };
+const HOW = { rifle: 'rifle', shotgun: 'shotgun', sniper: 'sniper', katana: 'katana', grenade: 'grenade', tank: 'TANK', deflect: 'their own bullet' };
 const howWord = (src) => HOW[src] || null;
 const spawnSpots = () => (level.arenaSpawns && level.arenaSpawns.length ? level.arenaSpawns : level.spawns);
 function arenaSpawn() {
@@ -815,6 +841,7 @@ net.onHostChange = (id, becameHost) => {
     broadcastLobby();
   }
   hud.message('HOST LEFT', becameHost ? 'you are hosting now' : 'someone else is hosting now', 2.4);
+  tanks.onHost();
   renderLobby();
 };
 net.on('refused', (d) => leaveOnline(d.reason));
@@ -951,7 +978,7 @@ net.on('botshots', (d, from) => {
   if (d.k === 'katana') audio.katanaSwing();
   else { if (d.bal) bullets.fire(null, origin, end.sub(origin).normalize(), { cosmetic: true, mv: d.mv || 330, maxRange: 65, ink: r?.ink ?? INK.BLUE }); else effects.tracer(origin, end, r?.ink ?? INK.BLUE, .02, .08); r?.flash(); audio.remoteShot(d.k, origin); }
 });
-net.on('brk', (d) => { const br = level.breakables[d.id]; if (br) breakProp(br, null, false); });
+net.on('brk', (d, from) => { const br = level.breakables[d.id]; if (br && (!br.tankEgg || from === net.hostId)) breakProp(br, null, false); });
 net.on('parry', (d) => { if (teamMode() && d.life != null && (d.round !== match.state?.round || d.life !== match.applied.get(net.id))) return; audio.shieldHit(player.center); input.rumble(0.35, 0.3, 60); effects.strokeBurst(player.eye.clone().addScaledVector(player.forward, 0.5), INK.ORANGE, 8, 5, { life: 0.2, size: 0.03 }); hud.kill(d.ret ? 'RETURN TO SENDER' : 'DEFLECTED', d.ret ? 25 : 0); });
 net.on('shots', (d, from) => {
   const r = remote.get(from); if (!r || !r.root || !r.alive) return;
@@ -1406,6 +1433,7 @@ function resetGame() {
   applyRules();
   if (online() && player.regenRate > 0) { player.regenDelay *= 4 / 4.5; player.regenRate *= 14 / 11; }
   player.reset(level.playerStart); player.name = myName; player.lastHitBy = null; player.lastHit = null; enemies.mods.speed = 1; enemies.mods.damage = 1; hud.setModifier(''); hud.setBoss(null, null); game.boss = null; endFocus(); game.katanaStreak = 0; game.rocketDropped = false;
+  tanks.reset();
   localNadeAnnouncements.clear();
   game.score = 0; game.kills = 0; game.combo = 0; game.wave = 0; game.intermission = 0; game.queue = []; game.time = 0; game.over = null; game.matchT = 0; hud.setScore(0, 0); hud.setTimer(''); hud.setPvpScore(null); hud.setWave(1, 0); hud.setBoard(null);
 }
@@ -1538,6 +1566,7 @@ function step(now) {
     game.time += dt; if (st === 'start' || st === 'dead' || st === 'lobby' || st === 'over') player.idleCam(game.time); effects.update(dt); if (net.active) netUpdate(dt);
     if (st === 'over') { game.overT += dt; if (net.isHost && game.overT > 8) { net.send('backtolobby', {}); toLobbyScreen(); } else if (!net.isHost && game.overT > 15) { toLobbyScreen(); } }
   }
+  tanks.update(dt);
   for (const a of level.animated) a.update(game.time);
   if (match.spectatedId) audio.setListener(R.camera.position, _listenerRight.setFromMatrixColumn(R.camera.matrixWorld, 0));
   else audio.setListener(player.eye, player.right);

@@ -79,6 +79,31 @@ Falling out of a team map resolves one death through the normal life/respawn rul
 A lost C4 returns to a reachable surface, preferring its carrier's last stable ground. Bots preserve
 an ongoing defuse and assign a replacement by walkable route if the current defuser dies.
 
+### Hidden tanks
+
+Every offered map hides one ordinary-looking service prop. Hit it with a gun, blade or explosion
+to reveal a compact, driveable tank. The tank has **88,888 HP**, a rotating turret and a cannon
+that fires every 1.5 seconds. It occupies one seat; the driver stays protected inside the hull.
+Destroying the hull kills its driver through the normal scoring and respawn rules.
+
+Use **H** on keyboard, **D-pad right** on a controller, or the contextual **TANK** touch button
+to enter. Movement controls drive and steer; look controls aim the turret; primary fire shoots.
+Hold **Space** or the touch **BRAKE** button to stop. Leaving requires a stopped tank. Another
+player beside a tank that has stopped for 0.4 seconds can hold the vehicle interaction for
+1.5 seconds to pull the driver out alive. Moving away, releasing the button or the tank moving
+cancels the attempt. The ejected driver becomes vulnerable and cannot immediately re-enter.
+The hull blocks walking bodies, and exits require a supported, unobstructed position.
+
+Tank state belongs to the host and follows late joins and host migration. The secret resets for
+each new match or demolition round. C4 must be handled on foot: entering drops carried C4, and
+planting/defusing is unavailable inside a tank. Vehicle controls are separate from the C4 key.
+A small translucent readout shows hull health, speed, cannon cooldown and interaction progress.
+
+Grenades deal 1.5 times their previous damage over 1.5 times their previous radius: the visual
+blast radius is 9.6 m, the effective damage radius is 9.12 m, and the maximum PvP damage is 93.
+The same scaling applies to bots, PvE damage and self-damage. Fuse timing and throwing distance
+are unchanged; rocket explosion tuning remains separate.
+
 ### Maps
 
 **DOODLE DISTRICT** is the original: streets, rooftops and fire escapes, and it is where the waves

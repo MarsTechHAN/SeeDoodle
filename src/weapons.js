@@ -267,6 +267,11 @@ export class Gun extends ViewModel {
     let end, hit = false, stopped = true;
     // other players in a versus match are targets too; the closest thing along the ray wins
     const hitP = ctx.raycastPlayers ? ctx.raycastPlayers(origin, dir, maxDist) : null;
+    const hitT = ctx.tanks?.raycast(origin, dir, maxDist);
+    if (hitT && (!hitE || hitT.dist < hitE.dist) && (!hitW || hitW.box.data.tankHull || hitT.dist < hitW.dist) && (!hitP || hitT.dist < hitP.dist)) {
+      ctx.tanks.hit(this.damage, { source: this.kind, point: hitT.point, origin: muzzle || origin, dir });
+      return { end: hitT.point, hit: true, stopped: true };
+    }
     if (hitP && (!hitE || hitP.dist < hitE.dist) && (!hitW || hitP.dist < hitW.dist)) {
       end = hitP.point; const crit = hitP.part === 'head'; const pv = this.pvp || [this.damage, this.headMul, this.falloff];
       const far = travelled + hitP.dist; let d = pv[0] * (crit ? pv[1] : 1);
@@ -630,6 +635,7 @@ export class Katana extends ViewModel {
     if (ctx.playersInArc) for (const t of ctx.playersInArc(P.eye, P.forward, 3.0, Math.cos(0.95))) { any = true; ctx.hitPlayer(t, 55 * multiplier, { point: t.center.clone(), dir: _v2.clone(), part: 'torso', source: 'katana', crit: false, charge: this.slashCharge }); }
     if (ctx.cutRopes && ctx.cutRopes(P.eye, P.forward, 3.4)) any = true;
     if (ctx.breakablesInArc) for (const br of ctx.breakablesInArc(P.eye, P.forward, 3.2, Math.cos(1.0))) { any = true; ctx.breakHit(br, this.damage * multiplier, br.pos.clone(), _v2.clone()); }
+    if (ctx.tanks?.melee(P.eye, P.forward, 3.2, this.damage * multiplier, { source: 'katana', charge: (multiplier - 1) / 2, origin: P.eye })) any = true;
     // a swing only cuts; bullets are turned aside by the raised guard, never by a slash
     if (any) { audio.katanaHit(); ctx.game.hitstop(0.07, 0.12); ctx.effects.shakeAmt += 0.12; ctx.input.rumble(0.7, 0.4, 90); this.recoil.kick(0, 0, 1.5); }
   }

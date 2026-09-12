@@ -44,7 +44,7 @@ export class RemotePlayer {
     this.center = new THREE.Vector3(); this.eye = new THREE.Vector3(); this.forward = new THREE.Vector3(0, 0, -1); this.right = new THREE.Vector3(1, 0, 0);
     this.yaw = 0; this.pitch = 0; this.crouching = false; this.sliding = false; this.blocking = false; this.aiming = false; this.firing = false;
     this.snapA = null; this.snapB = null; this.phase = 0; this.walk = 0; this.flashT = 0; this.deadT = 0; this.kills = 0; this.deaths = 0; this.score = 0;
-    this.viewHidden = false; this.viewSamples = []; this.viewEpoch = 0;
+    this.viewHidden = false; this.vehicleHidden = false; this.viewSamples = []; this.viewEpoch = 0;
     this.mat = makeInkMaterial({ ink, surface: 'cloth', shadeScale: 0, shadeBias: 1 }); this.solid = makeInkMaterial({ ink: INK.BLACK, fill: true, side: THREE.DoubleSide });
     this.tagMat = makeInkMaterial({ ink, fill: true, side: THREE.DoubleSide });
     this.nameTag = document.createElement('div'); this.nameTag.className = 'player-nametag'; this.nameTag.hidden = true;
@@ -140,7 +140,7 @@ export class RemotePlayer {
   }
   push(snap, t) {
     if (!snap) return;
-    const previous = this.snapB, wasAway = this.away;
+    const previous = this.snapB, wasAway = this.away, vehicle = !!this.ctx.tanks?.occupied(this.id);
     this.snapA = this.snapB || { p: new THREE.Vector3(snap[0], snap[1], snap[2]), yaw: snap[3], pitch: snap[4], t: t - 0.07 };
     this.snapB = { p: new THREE.Vector3(snap[0], snap[1], snap[2]), yaw: snap[3], pitch: snap[4], t };
     this.setWeapon(snap[5]); const f = snap[6];
@@ -151,8 +151,8 @@ export class RemotePlayer {
     // Spectating needs more than the last packet pair: the delayed view often falls before
     // that pair. Keep its presentation history separate from collision/hit interpolation.
     const samples = this.viewSamples;
-    if (!previous || (!wasAlive && this.alive) || (wasAway && !this.away) || t < previous.t || t - previous.t > 1 || previous.p.distanceToSquared(this.snapB.p) > 36) { samples.length = 0; this.viewEpoch++; }
-    Object.assign(this.snapB, { eyeHeight: this.crouching ? .88 : 1.6, vx: this.vel.x, vy: this.vel.y, vz: this.vel.z });
+    if (!previous || !!previous.vehicle !== vehicle || (!wasAlive && this.alive) || (wasAway && !this.away) || t < previous.t || t - previous.t > 1 || previous.p.distanceToSquared(this.snapB.p) > 36) { samples.length = 0; this.viewEpoch++; }
+    Object.assign(this.snapB, { vehicle, eyeHeight: vehicle ? 2.4 : this.crouching ? .88 : 1.6, vx: this.vel.x, vy: this.vel.y, vz: this.vel.z });
     if (samples.length && samples[samples.length - 1].t === t) samples.pop();
     samples.push(this.snapB);
     while (samples.length > 64 || (samples.length > 2 && samples[1].t < t - .6)) samples.shift();
@@ -160,7 +160,7 @@ export class RemotePlayer {
     if (this.alive && this.corpse) { this._buildModel(); this.setWeapon(snap[5]); this.snapA = null; this.body.pos.copy(this.snapB.p); }
     // A hidden first-person subject is still present. Reinitializing it on every packet
     // makes its interpolated body jump ahead and then slide backwards on the next frame.
-    if (this.root && !this.root.visible && !this.away && !this.viewHidden) { this.body.pos.copy(this.snapB.p); this.root.visible = true; }
+    if (this.root && !this.root.visible && !this.away && !this.viewHidden && !this.vehicleHidden && !vehicle) { this.body.pos.copy(this.snapB.p); this.root.visible = true; }
     if (this.root && this.away) this.root.visible = false;
   }
   sampleView(now, out) {
@@ -169,11 +169,14 @@ export class RemotePlayer {
     let a = samples[0], b = a;
     for (let i = 1; i < samples.length; i++) { b = samples[i]; if (b.t >= at) break; a = b; }
     const k = a === b ? 0 : clamp((at - a.t) / (b.t - a.t), 0, 1);
-    out.eye.lerpVectors(a.p, b.p, k); out.eye.y += a.eyeHeight + (b.eyeHeight - a.eyeHeight) * k;
+    const vehicle = !!this.ctx.tanks?.occupied(this.id);
+    out.eye.lerpVectors(a.p, b.p, k);
+    // Seat changes may arrive before the next pose packet; old samples must not put the camera inside the hull.
+    out.eye.y += vehicle !== !!b.vehicle ? vehicle ? 2.4 : this.crouching ? .88 : 1.6 : a.eyeHeight + (b.eyeHeight - a.eyeHeight) * k;
     // Brief packet gaps can coast; a lost connection must not fly the camera through the map.
     const late = clamp(at - b.t, 0, .1);
     out.eye.x += b.vx * late; out.eye.y += b.vy * late; out.eye.z += b.vz * late;
-    out.yaw = angleLerp(a.yaw, b.yaw, k); out.pitch = a.pitch + (b.pitch - a.pitch) * k; out.epoch = this.viewEpoch;
+    out.yaw = angleLerp(a.yaw, b.yaw, k); out.pitch = a.pitch + (b.pitch - a.pitch) * k; out.epoch = `${this.viewEpoch}:${vehicle ? 'tank' : 'foot'}`;
     return true;
   }
   // damage dealt to this player by the host's bots or by another player's shot goes to its owner
