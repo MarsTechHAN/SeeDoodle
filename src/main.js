@@ -71,6 +71,7 @@ const ctx = { scene: R.scene, camera: R.camera, world, level, nav, input, hud, e
 // ---------------- persistent bits ----------------
 let best = Number(localStorage.getItem('doodle_best') || 0);
 let musicWanted = localStorage.getItem('doodle_music') !== '0';
+let tankEggsWanted = localStorage.getItem('doodle_tank_eggs') !== '0';
 let checkpoint = Number(localStorage.getItem('doodle_checkpoint') || 0);
 let myName = (localStorage.getItem('doodle_name') || '').slice(0, 14) || 'doodle' + Math.floor(Math.random() * 90 + 10);
 // The config panel writes straight into this object and the player reads it live off ctx.opt, so a
@@ -111,11 +112,12 @@ ctx.grenadeOwnerPos = (id) => {
   return r.center.clone().add(new THREE.Vector3(0, 0.35, 0));
 };
 input.onControlCancel = () => { player.cancelGrenade?.(); player.cancelKnife?.(); ctx.tanks?.cancelInput(); boardToggle = false; };
-const lobby = { players: new Map(), hostId: null, isPublic: true, status: '', code: '', map: null, gameMode: 'ffa', ballistics: false, diff: 'easy', mob: 'mid', weaponMode: 'normal', skin: 'classic' };
+const lobby = { players: new Map(), hostId: null, isPublic: true, status: '', code: '', map: null, gameMode: 'ffa', ballistics: false, diff: 'easy', mob: 'mid', weaponMode: 'normal', skin: 'classic', tankEggs: true };
 const colorSeats = new Map(); // recently departed ids -> { color, until }, shared with the next host
 const scores = new Map();      // peer id -> { name, kills, deaths }
 let screen = 'main';           // which start-screen panel is showing: main | online | lobby
 ctx.touch = touch;
+ctx.tankEggsEnabled = () => net.connected ? lobby.tankEggs !== false : tankEggsWanted;
 const match = ctx.match = new TeamMatch(ctx, { net, lobby, remote, scores, sendScores, endMatch, clearRound: () => { localNadeAnnouncements.clear(); ctx.tanks?.reset(); } });
 const tanks = ctx.tanks = new TankSystem(ctx, { net, remote, match, lobby });
 window.__game = { ctx, game, player, enemies, nav, world, level, hud, effects, input, net, remote, lobby, scores, match, tanks };
@@ -227,18 +229,24 @@ ctx.cutRopes = (eye, dir, range) => {
 const _v = new THREE.Vector3();
 // breakable props: bullets, blades and blasts break them, and everyone in a match sees it go
 ctx.breakHit = (br, dmg, point, dir) => {
-  if (br.tankEgg) { if (br.alive) tanks.hitEgg(br); return; }
+  if (br.tankEgg && ctx.tankEggsEnabled()) { if (br.alive) tanks.hitEgg(br); return; }
   if (!br.alive) return; br.hp -= dmg;
   if (br.hp <= 0) breakProp(br, dir, true); else { effects.strokeBurst(point, br.ink, 5, 4, { life: 0.2, size: 0.03 }); audio.shieldHit(point); }
 };
 ctx.breakablesInArc = (pos, dir, range, cosHalf) => level.breakables.filter((br) => { if (!br.alive) return false; _v.subVectors(br.pos, pos); const d = _v.length(); return d < range + 0.5 && (d < 0.4 || _v.divideScalar(d).dot(dir) > cosHalf); });
-ctx.blastBreakables = (c, R) => { for (const br of level.breakables) if (br.alive && br.pos.distanceTo(c) < R * 0.9) { if (br.tankEgg) tanks.hitEgg(br); else breakProp(br, br.pos.clone().sub(c).normalize(), true); } };
+ctx.blastBreakables = (c, R) => { for (const br of level.breakables) if (br.alive && br.pos.distanceTo(c) < R * 0.9) { if (br.tankEgg && ctx.tankEggsEnabled()) tanks.hitEgg(br); else breakProp(br, br.pos.clone().sub(c).normalize(), true); } };
 ctx.breakTankEgg = (br) => breakProp(br, null, net.isHost);
 ctx.onTankEnter = (id) => { if (game.mode === 'demolition' && net.isHost) match.dropBomb(id); };
 ctx.forceTankDeath = (by) => {
   if (!player.alive || game.state !== 'play') return;
   player.lastHitBy = by || null; player.lastHit = { from: player.center.toArray(), crit: false, amount: player.hp, src: 'tank' };
   player.hp = 0; player.shieldT = 0; player.die();
+};
+ctx.tankAimPoint = (origin, dir, range) => {
+  const wall = world.raycast(origin, dir, range, SEE_THROUGH), enemy = enemies.raycast(origin, dir, range), target = ctx.raycastPlayers(origin, dir, range);
+  let nearest = wall;
+  for (const hit of [enemy, target]) if (hit && (!nearest || hit.dist < nearest.dist)) nearest = hit;
+  return nearest ? nearest.point.clone() : origin.clone().addScaledVector(dir, range);
 };
 ctx.fireTankCannon = (event) => {
   const origin = new THREE.Vector3().fromArray(event.pos), dir = new THREE.Vector3().fromArray(event.dir).normalize();
@@ -782,7 +790,7 @@ function applyLobbyPlayers(rows, reservations) {
   const mine = lobby.players.get(net.id);
   if (!net.isHost && mine && JSON.stringify(mine.appearance) !== JSON.stringify(myAppearance)) net.send('appearance', myAppearance);
 }
-function broadcastLobby() { net.send('lobby', { players: lobbyRows(), colors: reservedColors(), hostId: net.id, isPublic: lobby.isPublic, map: lobby.map || mapKey, mode: lobby.gameMode, bal: !!lobby.ballistics, diff: ctx.difficulty(), mob: lobby.mob, weaponMode: ctx.weaponMode(), skin: ctx.skin(), shown: net.aliasCode || net.code }); renderLobby(); }
+function broadcastLobby() { net.send('lobby', { players: lobbyRows(), colors: reservedColors(), hostId: net.id, isPublic: lobby.isPublic, map: lobby.map || mapKey, mode: lobby.gameMode, bal: !!lobby.ballistics, diff: ctx.difficulty(), mob: lobby.mob, weaponMode: ctx.weaponMode(), skin: ctx.skin(), tankEggs: ctx.tankEggsEnabled(), shown: net.aliasCode || net.code }); renderLobby(); }
 const inMatch = () => ['play', 'dying', 'over'].includes(game.state);
 let boardT = 0;   // seconds since the open scoreboard was last redrawn
 net.onPeerLeave = (id) => { match.removeMember(id); const nm = (lobby.players.get(id) || {}).name; removeRemote(id); broadcastLobby(); if (inMatch()) { hud.kill(t`${nm || ts('someone')} left`, 0); sendScores(); } };
@@ -859,7 +867,7 @@ net.onPeerJoin = (from, meta) => {
   colorSeats.delete(from); lobby.players.set(from, { name, color, appearance, team, bot: false }); applyTeams(); if (teamMode() && inMatch()) match.addMember(from); broadcastLobby();
   if (game.state === 'play' || game.state === 'dying') {
     if (!scores.has(from)) scores.set(from, { name, kills: 0, deaths: 0 });
-    net.sendTo(from, 'start', { late: true, players: lobbyRows(), colors: reservedColors(), combat: teamMode() ? match.state : null, spawn: farthestSpawnIndex(), map: lobby.map || mapKey, mode: game.mode, bal: !!lobby.ballistics, diff: ctx.difficulty(), mob: lobby.mob, weaponMode: ctx.weaponMode(), skin: ctx.skin(), grenades: player.grenadeSnapshot(), broken: level.breakables.filter((b) => !b.alive).map((b) => b.id) });
+    net.sendTo(from, 'start', { late: true, players: lobbyRows(), colors: reservedColors(), combat: teamMode() ? match.state : null, spawn: farthestSpawnIndex(), map: lobby.map || mapKey, mode: game.mode, bal: !!lobby.ballistics, diff: ctx.difficulty(), mob: lobby.mob, weaponMode: ctx.weaponMode(), skin: ctx.skin(), tankEggs: ctx.tankEggsEnabled(), grenades: player.grenadeSnapshot(), broken: level.breakables.filter((b) => !b.alive).map((b) => b.id) });
     // a latecomer has an empty world until it is told what is already standing in it
     if (coopHost()) setTimeout(() => sendCoopCatchUp(from), 350);
     sendScores(); hud.kill(t`${name} joined`, 0);
@@ -867,13 +875,13 @@ net.onPeerJoin = (from, meta) => {
 };
 net.on('lobby', (d, from) => {
   if (net.isHost || from !== net.hostId || !Array.isArray(d.players)) return;
-  lobby.hostId = d.hostId; lobby.isPublic = !!d.isPublic; lobby.code = net.code; lobby.shown = d.shown || net.code; if (d.map) lobby.map = knownMap(d.map); lobby.gameMode = modeOf(d.mode); lobby.ballistics = !!d.bal; if (d.mob) lobby.mob = d.mob; if (d.diff) lobby.diff = d.diff; lobby.weaponMode = weaponModeOf(d.weaponMode).key; lobby.skin = skinOf(d.skin).key; applyRules();
+  lobby.hostId = d.hostId; lobby.isPublic = !!d.isPublic; lobby.code = net.code; lobby.shown = d.shown || net.code; if (d.map) lobby.map = knownMap(d.map); lobby.gameMode = modeOf(d.mode); lobby.ballistics = !!d.bal; if (d.mob) lobby.mob = d.mob; if (d.diff) lobby.diff = d.diff; lobby.weaponMode = weaponModeOf(d.weaponMode).key; lobby.skin = skinOf(d.skin).key; lobby.tankEggs = d.tankEggs !== false; applyRules();
   applyLobbyPlayers(d.players, d.colors);
   if (inMatch()) { for (const p of d.players) if (!scores.has(p.id)) scores.set(p.id, { name: p.name, kills: 0, deaths: 0 }); refreshScoreHud(); }
   renderLobby();
 });
 net.on('leave', (d) => { const nm = (lobby.players.get(d.id) || {}).name; removeRemote(d.id); if (inMatch()) hud.kill(t`${nm || ts('someone')} left`, 0); renderLobby(); });
-net.on('start', (d, from) => { if (net.isHost || from !== net.hostId) return; lobby.gameMode = modeOf(d.mode); if (d.players) applyLobbyPlayers(d.players, d.colors); if (d.map) lobby.map = knownMap(d.map); if (d.bal !== undefined) lobby.ballistics = !!d.bal; if (d.diff) lobby.diff = d.diff; if (d.mob) lobby.mob = d.mob; lobby.weaponMode = weaponModeOf(d.weaponMode).key; lobby.skin = skinOf(d.skin).key; startMatch(!!d.late, d.spawns ? d.spawns[net.id] : d.spawn, modeOf(d.mode)); if (d.combat && teamMode()) match.receive(d.combat); if (d.late && Array.isArray(d.grenades)) player.syncGrenades(d.grenades); if (d.broken) for (const id of d.broken) { const br = level.breakables[id]; if (br) breakProp(br, null, false, true); } });
+net.on('start', (d, from) => { if (net.isHost || from !== net.hostId) return; lobby.gameMode = modeOf(d.mode); if (d.players) applyLobbyPlayers(d.players, d.colors); if (d.map) lobby.map = knownMap(d.map); if (d.bal !== undefined) lobby.ballistics = !!d.bal; if (d.diff) lobby.diff = d.diff; if (d.mob) lobby.mob = d.mob; lobby.weaponMode = weaponModeOf(d.weaponMode).key; lobby.skin = skinOf(d.skin).key; lobby.tankEggs = d.tankEggs !== false; startMatch(!!d.late, d.spawns ? d.spawns[net.id] : d.spawn, modeOf(d.mode)); if (d.combat && teamMode()) match.receive(d.combat); if (d.late && Array.isArray(d.grenades)) player.syncGrenades(d.grenades); if (d.broken) for (const id of d.broken) { const br = level.breakables[id]; if (br) breakProp(br, null, false, true); } });
 net.on('startreq', () => { if (net.isHost && game.state === 'lobby') hostStart(); });
 
 // ---------------- co-op: the host owns the enemies, everyone else mirrors them ----------------
@@ -978,7 +986,7 @@ net.on('botshots', (d, from) => {
   if (d.k === 'katana') audio.katanaSwing();
   else { if (d.bal) bullets.fire(null, origin, end.sub(origin).normalize(), { cosmetic: true, mv: d.mv || 330, maxRange: 65, ink: r?.ink ?? INK.BLUE }); else effects.tracer(origin, end, r?.ink ?? INK.BLUE, .02, .08); r?.flash(); audio.remoteShot(d.k, origin); }
 });
-net.on('brk', (d, from) => { const br = level.breakables[d.id]; if (br && (!br.tankEgg || from === net.hostId)) breakProp(br, null, false); });
+net.on('brk', (d, from) => { const br = level.breakables[d.id]; if (br && (!br.tankEgg || !ctx.tankEggsEnabled() || from === net.hostId)) breakProp(br, null, false); });
 net.on('parry', (d) => { if (teamMode() && d.life != null && (d.round !== match.state?.round || d.life !== match.applied.get(net.id))) return; audio.shieldHit(player.center); input.rumble(0.35, 0.3, 60); effects.strokeBurst(player.eye.clone().addScaledVector(player.forward, 0.5), INK.ORANGE, 8, 5, { life: 0.2, size: 0.03 }); hud.kill(d.ret ? 'RETURN TO SENDER' : 'DEFLECTED', d.ret ? 25 : 0); });
 net.on('shots', (d, from) => {
   const r = remote.get(from); if (!r || !r.root || !r.alive) return;
@@ -1085,7 +1093,7 @@ async function createLobby(isPublic) {
   setStatus('opening a lobby…');
   try { await net.host({ isPublic }); }
   catch (err) { setStatus(friendlyError(err)); unlockButtons(); return; }
-  lobby.isPublic = isPublic; lobby.map = mapKey; lobby.ballistics = settings.ballistics; lobby.diff = settings.difficulty; lobby.mob = lobby.mob || 'mid'; lobby.players.clear(); colorSeats.clear(); lobby.players.set(net.id, { name: myName, color: 0, appearance: myAppearance, team: 0, bot: false }); player.color = 0; player.ink = playerInk(0); lobby.hostId = net.id; lobby.status = ''; lobby.weaponMode = 'normal'; lobby.skin = skinKey; net._meta = { name: myName, appearance: myAppearance }; applyRules();
+  lobby.isPublic = isPublic; lobby.map = mapKey; lobby.ballistics = settings.ballistics; lobby.diff = settings.difficulty; lobby.mob = lobby.mob || 'mid'; lobby.players.clear(); colorSeats.clear(); lobby.players.set(net.id, { name: myName, color: 0, appearance: myAppearance, team: 0, bot: false }); player.color = 0; player.ink = playerInk(0); lobby.hostId = net.id; lobby.status = ''; lobby.weaponMode = 'normal'; lobby.skin = skinKey; lobby.tankEggs = tankEggsWanted; net._meta = { name: myName, appearance: myAppearance }; applyRules();
   game.state = 'lobby'; screen = 'lobby'; showStart();
 }
 async function joinLobby(code) {
@@ -1282,7 +1290,7 @@ function mainHTML() {
     ${skinHTML(ctx.skin(), true)}
     ${appearanceHTML()}
     <div class="mainbtns"><button type="button" class="start" id="soloBtn">START<i>solo · survive the waves</i></button><button type="button" id="onlineBtn">PLAY ONLINE<i>free for all or squad survival · up to 32 players</i></button></div>
-    ${mapHTML(mapKey, true)}${touchMode ? TOUCH_CONTROLS_HTML : CONTROLS_HTML}${settingsHTML()}${checkpointHTML()}${best ? `<div class="beststat">${t`best score: ${best}`}</div>` : ''}`;
+    ${mapHTML(mapKey, true)}${tankEggsHTML(tankEggsWanted, true)}${touchMode ? TOUCH_CONTROLS_HTML : CONTROLS_HTML}${settingsHTML()}${checkpointHTML()}${best ? `<div class="beststat">${t`best score: ${best}`}</div>` : ''}`;
 }
 const sameOrigin = () => (typeof location !== 'undefined' && /^https?:$/.test(location.protocol) ? location.host : 'localhost:8080');
 function onlineHTML() {
@@ -1326,6 +1334,19 @@ function ballHTML(sel, canPick) {
 function weaponModeHTML(selected, canPick) {
   return `<div class="modesel weapon-modes" id="weaponsel"><span>${ts('weapon mode')}</span>${Object.entries(WEAPON_MODES).map(([key, rule]) => `<button type="button" class="modebtn${key === selected ? ' on' : ''}" data-weapons="${key}" aria-pressed="${key === selected}" ${canPick ? '' : 'disabled'}>${ts(rule.name)}<i>${ts(rule.blurb)}</i></button>`).join('')}</div>`;
 }
+function tankEggsHTML(enabled, canPick) {
+  return `<div class="modesel" id="tanksel"><span>${ts('tank Easter eggs')}</span>${[true, false].map(on => `<button type="button" class="modebtn${on === enabled ? ' on' : ''}" data-tankeggs="${on ? '1' : '0'}" aria-pressed="${on === enabled}" ${canPick ? '' : 'disabled'}>${ts(on ? 'ON' : 'OFF')}<i>${ts(on ? 'Hidden props can reveal tanks' : 'Hidden props stay ordinary')}</i></button>`).join('')}</div>${canPick ? '' : `<div class="hint">${ts('Host controls this option')}</div>`}`;
+}
+function wireTankEggs(box) {
+  box.querySelector('#tanksel')?.addEventListener('click', e => {
+    e.stopPropagation();
+    const button = e.target.closest('[data-tankeggs]');
+    if (!button || button.disabled || (net.connected ? !net.isHost || game.state !== 'lobby' : game.state !== 'start')) return;
+    tankEggsWanted = button.dataset.tankeggs === '1'; localStorage.setItem('doodle_tank_eggs', tankEggsWanted ? '1' : '0');
+    if (net.connected) { lobby.tankEggs = tankEggsWanted; broadcastLobby(); }
+    else showStart();
+  });
+}
 function lobbyHTML() {
   const rows = lobbyRows(); const host = net.isHost; const n = rows.length; const isCoop = lobby.gameMode === 'coop';
   const blurb = isTeamMode(lobby.gameMode) ? ts(lobby.gameMode === 'tdm' ? 'TEAM DEATHMATCH' : 'DEMOLITION') : isCoop ? ts('squad survival · you against the page') : t`free for all · first to ${FFA_TARGET}`;
@@ -1336,6 +1357,7 @@ function lobbyHTML() {
       ${appearanceHTML()}
       ${modeHTML(lobby.gameMode, host)}
       ${weaponModeHTML(ctx.weaponMode(), host)}
+      ${tankEggsHTML(ctx.tankEggsEnabled(), host)}
       ${mapHTML(matchMap(lobby.map || mapKey, lobby.gameMode), host, !isCoop, isTeamMode(lobby.gameMode))}
       ${ballHTML(lobby.ballistics, host)}
       ${diffHTML(ctx.difficulty(), host)}
@@ -1362,7 +1384,7 @@ async function refreshLobbies() {
 function wireOnline() {
   const box = hud.el.panel.querySelector('#online'); if (!box) return;
   box.addEventListener('click', (e) => e.stopPropagation()); box.addEventListener('keydown', (e) => e.stopPropagation());
-  const q = (id) => box.querySelector('#' + id); wireName(box);
+  const q = (id) => box.querySelector('#' + id); wireName(box); wireTankEggs(box);
   box.querySelectorAll('[data-addbot]').forEach((b) => b.addEventListener('click', () => addBot(Number(b.dataset.addbot))));
   if (q('fillBotsBtn')) q('fillBotsBtn').addEventListener('click', fillBots);
   box.querySelectorAll('[data-removebot]').forEach((b) => b.addEventListener('click', () => { if (net.isHost && game.state === 'lobby' && lobby.players.get(b.dataset.removebot)?.bot) { removeRemote(b.dataset.removebot); broadcastLobby(); } }));
@@ -1394,7 +1416,7 @@ function showStart() {
   wireSkin(); wireAppearance();
   const p = hud.el.panel;
   if (screen === 'main') {
-    wireSettings(); wireCheckpoints((w) => beginAtWave(w)); wireMap((k) => { mapKey = k; localStorage.setItem('doodle_map', k); showStart(); });
+    wireSettings(); wireTankEggs(p); wireCheckpoints((w) => beginAtWave(w)); wireMap((k) => { mapKey = k; localStorage.setItem('doodle_map', k); showStart(); });
     p.querySelector('#soloBtn').addEventListener('click', (e) => { e.stopPropagation(); begin(); });
     p.querySelector('#onlineBtn').addEventListener('click', (e) => { e.stopPropagation(); screen = 'online'; showStart(); });
   } else wireOnline();
@@ -1449,7 +1471,7 @@ function hostStart() {
   // deal everyone a different spot, shuffled so the same people do not always start together
   setArena(mode !== 'coop'); const order = spawnSpots().map((_, i) => i); for (let i = order.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; }
   const spawns = {}; [...lobby.players.keys()].forEach((id, i) => { spawns[id] = order[i % order.length]; });
-  net.send('start', { spawns, players: lobbyRows(), colors: reservedColors(), map: lobby.map || mapKey, mode, bal: !!lobby.ballistics, diff: ctx.difficulty(), mob: lobby.mob, weaponMode: ctx.weaponMode(), skin: ctx.skin() }); startMatch(false, spawns[net.id], mode); if (isTeamMode(mode)) match.start(); sendScores();
+  net.send('start', { spawns, players: lobbyRows(), colors: reservedColors(), map: lobby.map || mapKey, mode, bal: !!lobby.ballistics, diff: ctx.difficulty(), mob: lobby.mob, weaponMode: ctx.weaponMode(), skin: ctx.skin(), tankEggs: ctx.tankEggsEnabled() }); startMatch(false, spawns[net.id], mode); if (isTeamMode(mode)) match.start(); sendScores();
   if (mode === 'coop') startWave(1);
 }
 function startMatch(late, spawnIdx, mode = 'ffa') {
@@ -1567,8 +1589,9 @@ function step(now) {
     if (st === 'over') { game.overT += dt; if (net.isHost && game.overT > 8) { net.send('backtolobby', {}); toLobbyScreen(); } else if (!net.isHost && game.overT > 15) { toLobbyScreen(); } }
   }
   tanks.update(dt);
+  tanks.updateSpectatorCamera?.(match.spectatedId, R.camera, dt);
   for (const a of level.animated) a.update(game.time);
-  if (match.spectatedId) audio.setListener(R.camera.position, _listenerRight.setFromMatrixColumn(R.camera.matrixWorld, 0));
+  if (match.spectatedId || tanks.occupied()) audio.setListener(R.camera.position, _listenerRight.setFromMatrixColumn(R.camera.matrixWorld, 0));
   else audio.setListener(player.eye, player.right);
   const w = player.weapon; if (w.isGun) hud.setAmmo(w.mag, w.reserve, w.magSize, w.reloading); else hud.setKatana();
   if (touch && !w.isGun) touch.clearAim();   // the katana has nothing to scope, so drop the toggle

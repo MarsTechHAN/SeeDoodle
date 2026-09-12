@@ -12,6 +12,9 @@ const xyz = a => Array.isArray(a) && a.length === 3 && a.every(n => Number.isFin
 const angle = (a, b, t) => a + Math.atan2(Math.sin(b - a), Math.cos(b - a)) * t;
 const clone = s => JSON.parse(JSON.stringify(s));
 const transparent = b => SEE_THROUGH(b) || b.data.tankHull === true;
+const direction = (yaw, pitch) => new THREE.Vector3(-Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch));
+const headingDegrees = yaw => ((-yaw * 180 / Math.PI) % 360 + 360) % 360;
+const CAMERA_ARM = 6, CAMERA_RADIUS = .23;
 
 // One seat and one simulation belong to the host. Peers send intentions; snapshots also carry
 // ejection/destruction events so a missed packet cannot leave a passenger trapped or invulnerable.
@@ -35,6 +38,7 @@ export class TankSystem {
   get round() { return this.match?.active() ? this.match.state?.round ?? 0 : 0; }
   get map() { return this.ctx.level.key || 'district'; }
   now() { return performance.now(); }
+  enabled() { return this.ctx.tankEggsEnabled?.() !== false; }
   active() { return ['play', 'dying'].includes(this.ctx.game.state) && !this.ctx.game.over && (!this.match?.active() || this.match.canFight()); }
   controlsAllowed() {
     const input = this.ctx.input;
@@ -44,6 +48,7 @@ export class TankSystem {
     if (this._seat && this.ctx.player) this.ctx.player.rig.visible = true;
     this.inputs.clear(); this.pulls.clear(); this.lockouts.clear(); this.damageClock.clear(); this.blasts.clear();
     this._seat = false; this._held = false; this.localHold = 0; this.prediction = null; this._lastDriver = null; this._holdStart = null;
+    this._viewHullYaw = null; this._cameraTrack = { distance: null }; this._spectatorTrack = null; this.aimTarget = null; this.aimScreen = null; this.shotBlocked = false; this._hideMeshes(false);
     for (const p of this.remote.values()) if (p.vehicleHidden) {
       p.vehicleHidden = false; if (p.root && p.alive && !p.away && !p.viewHidden) p.root.visible = true;
     }
@@ -77,6 +82,7 @@ export class TankSystem {
     if (!d || d.map !== this.map || d.round !== this.round || typeof d.epoch !== 'string' || d.epoch.length > 80 || !xyz(d.pos) ||
       !Number.isFinite(d.hp) || d.hp < 0 || d.hp > TANK_HP || ![d.yaw, d.turret, d.pitch, d.speed].every(Number.isFinite) ||
       !Number.isSafeInteger(d.rev) || (d.driver !== null && typeof d.driver !== 'string')) return;
+    if (!this.enabled() && d.spawned && !this.state?.spawned) return;
     const fresh = !this.state || d.epoch !== this.state.epoch;
     if (!fresh && d.rev <= this.state.rev) return;
     const wasSpawned = this.state?.spawned;
@@ -112,7 +118,7 @@ export class TankSystem {
   }
   _stopped() { return Math.abs(this.state.speed) < STOP && this.now() - this.stillSince >= 400; }
   hitEgg(br) {
-    if (!br?.tankEgg || this.state.spawned || !this.active()) return false;
+    if (!this.enabled() || !br?.tankEgg || this.state.spawned || !this.active()) return false;
     this._send({ op: 'egg', id: br.id }); return true;
   }
   _breakEgg() {
@@ -130,7 +136,7 @@ export class TankSystem {
     if (!this.ctx.world.boxes.includes(br.box)) { this.ctx.world.boxes.push(br.box); this.ctx.world.finalize(); }
   }
   _spawn() {
-    const egg = this._egg; if (!egg || !xyz(egg.spawn)) return;
+    const egg = this._egg; if (!this.enabled() || !egg || !xyz(egg.spawn)) return;
     this.body.pos.fromArray(egg.spawn); this.body.vel.set(0, 0, 0);
     if (this.ctx.world.overlapsBody(this.body)) return;
     const pos = this.body.pos;
@@ -152,7 +158,7 @@ export class TankSystem {
     if (this.match?.active() && d.life !== currentLife && !delayedBlast) return;
     const s = this.state, now = this.now();
     if (d.op === 'egg') {
-      if (s.spawned || !this._egg) return;
+      if (!this.enabled() || s.spawned || !this._egg) return;
       const p = this.actor(from), br = this.ctx.level.breakables?.find(b => b.tankEgg);
       if (!br || d.id !== br.id || p.body.pos.distanceTo(vec(this._egg.spawn)) > 300) return;
       this._spawn(); return;
@@ -162,7 +168,7 @@ export class TankSystem {
       if (s.driver || !this._near(from) || (this.lockouts.get(from) || 0) > now || !this._stopped()) return;
       s.driver = from; s.driverLife = this.match?.actor(from)?.life ?? 0;
       this.inputs.clear(); this.pulls.clear(); this.fireAt = now + 350; this.fireUnlocked = false;
-      s.turret = this.actor(from).yaw || s.yaw; s.pitch = 0; this.ctx.onTankEnter?.(from); this.publish();
+      s.turret = s.yaw; s.pitch = -.12; this.ctx.onTankEnter?.(from); this.publish();
     } else if (d.op === 'exit') {
       if (s.driver === from && this._stopped()) this._eject(from);
     } else if (d.op === 'pull') {
@@ -175,7 +181,9 @@ export class TankSystem {
       if (s.driver !== from || ![d.throttle, d.steer, d.yaw, d.pitch].every(Number.isFinite)) return;
       if (!d.fire) this.fireUnlocked = true;
       this.inputs.set(from, { throttle: clamp(d.throttle, -1, 1), steer: clamp(d.steer, -1, 1),
-        yaw: Math.atan2(Math.sin(d.yaw), Math.cos(d.yaw)), pitch: clamp(d.pitch, -.55, .65), brake: !!d.brake, fire: !!d.fire, at: now });
+        yaw: Math.atan2(Math.sin(d.yaw), Math.cos(d.yaw)), pitch: clamp(d.pitch, -.55, .65),
+        aim: xyz(d.aim) && vec(d.aim).distanceTo(vec(s.pos)) <= 265 ? d.aim.slice() : null,
+        brake: !!d.brake, fire: !!d.fire, at: now });
     } else if (d.op === 'hit') this._damage(d, from);
   }
   _exitPosition(id) {
@@ -314,30 +322,92 @@ export class TankSystem {
     if (this.occupied()) this._send({ op: 'drive', throttle: 0, steer: 0, yaw: this.ctx.player.yaw, pitch: this.ctx.player.pitch, brake: true, fire: false });
   }
   updatePlayer(p, dt) {
-    if (!this.occupied() || !p.alive) { if (this._seat) { p.rig.visible = true; this._seat = false; this.prediction = null; } return false; }
+    if (!this.occupied() || !p.alive) { if (this._seat) { p.rig.visible = true; this._seat = false; this.prediction = null; this._hideMeshes(false); } return false; }
     const inp = this.ctx.input, now = this.now(), enabled = this.controlsAllowed() && (!this.ctx.combatInputAllowed || this.ctx.combatInputAllowed());
     if (!this._seat) {
       p.cancelGrenade?.(); p.cancelKnife?.(); p.detachGrapple?.(false); p._stepOffset = 0; p.sliding = false; p.crouching = false;
-      p.pitch = this.state.pitch; p.yaw = this.state.turret; this._seat = true; this.inputAt = 0; this.localFireReady = !inp.down('fire');
+      p.pitch = -.12; p.yaw = this.state.yaw; this._viewHullYaw = this._motion().yaw; this._cameraTrack = { distance: null };
+      this._seat = true; this.inputAt = 0; this.localFireReady = !inp.down('fire');
     }
+    this._followHull(p);
     if (enabled) { p.yaw += inp.look.x; p.pitch = clamp(p.pitch + inp.look.y, -.55, .65); }
     if (!inp.down('fire')) this.localFireReady = true;
+    this._seatPose(p, 0);
     this.localControl = { throttle: enabled ? inp.move.y : 0, steer: enabled ? inp.move.x : 0, yaw: p.yaw, pitch: p.pitch,
-      brake: !enabled || inp.down('jump'), fire: enabled && this.localFireReady && inp.down('fire'), at: now };
+      aim: this.aimTarget?.toArray(), brake: !enabled || inp.down('jump'), fire: enabled && this.localFireReady && inp.down('fire'), at: now };
     if (now >= this.inputAt) { this._send({ op: 'drive', ...this.localControl }); this.inputAt = now + 100; }
     if (this.authority) { this.inputs.set(this.id, this.localControl); if (!this.localControl.fire) this.fireUnlocked = true; }
-    this._seatPose(p); return true;
+    return true;
   }
-  _seatPose(p) {
-    const pos = this.display, motion = !this.authority && this.prediction ? this.prediction.state : this.state;
+  _motion() { return !this.authority && this.prediction ? this.prediction.state : this.state; }
+  _followHull(p) {
+    const yaw = this._motion().yaw;
+    if (this._viewHullYaw !== null && this._viewHullYaw !== undefined) p.yaw += Math.atan2(Math.sin(yaw - this._viewHullYaw), Math.cos(yaw - this._viewHullYaw));
+    this._viewHullYaw = yaw;
+  }
+  _seatPose(p, dt = 0) {
+    const pos = this.display, motion = this._motion(); this._followHull(p);
     p.body.pos.copy(pos); p.body.vel.set(-Math.sin(motion.yaw) * motion.speed, this.body.vel.y, -Math.cos(motion.yaw) * motion.speed);
     p.body.onGround = true; p.speed = Math.abs(motion.speed);
     p.eye.copy(pos).add(new THREE.Vector3(0, 2.4, 0)); p.center.copy(pos).add(new THREE.Vector3(0, 1.25, 0));
-    p.forward.set(-Math.sin(p.yaw) * Math.cos(p.pitch), Math.sin(p.pitch), -Math.cos(p.yaw) * Math.cos(p.pitch));
-    p.right.set(Math.cos(p.yaw), 0, -Math.sin(p.yaw)); p.camera.position.copy(p.eye); p.camera.rotation.set(p.pitch, p.yaw, 0, 'YXZ');
-    p.aimOrigin.copy(p.eye); p.aimFwd.copy(p.forward); p.aimRight.copy(p.right); p.rig.visible = false; p.firing = false; p._aiming = false;
+    p.forward.copy(direction(p.yaw, p.pitch)); p.right.set(Math.cos(p.yaw), 0, -Math.sin(p.yaw));
+    this._chaseCamera(pos, p.yaw, p.pitch, p.camera, this._cameraTrack ||= { distance: null }, dt);
+    p.aimOrigin.copy(p.camera.position); p.aimFwd.copy(p.forward); p.aimRight.copy(p.right); p.rig.visible = false; p.firing = false; p._aiming = false;
     p.ctx.hud.setScope(false); p.ctx.hud.setAds(false);
     if (Math.abs(p.camera.fov - p.opt.fov) > .1) { p.camera.fov = p.opt.fov; p.camera.updateProjectionMatrix(); }
+    this.aimTarget = this.ctx.tankAimPoint?.(p.camera.position, p.forward, 240) || this.ctx.world.raycast(p.camera.position, p.forward, 240, transparent)?.point || p.camera.position.clone().addScaledVector(p.forward, 240);
+    const shot = this._shotForTarget(this.state.pos, this.aimTarget, p.yaw, p.pitch);
+    this.aimYaw = Math.atan2(-shot.dir.x, -shot.dir.z); this.aimPitch = Math.asin(clamp(shot.dir.y, -1, 1)); this.shotBlocked = shot.blocked;
+    this.aimScreen = null;
+    if (shot.blocked) {
+      const marker = shot.impact.clone().project(p.camera);
+      if (marker.z >= -1 && marker.z <= 1 && Math.abs(marker.x) <= 1 && Math.abs(marker.y) <= 1) this.aimScreen = { x: (marker.x + 1) / 2, y: (1 - marker.y) / 2 };
+    }
+    if (this.localControl) Object.assign(this.localControl, { yaw: p.yaw, pitch: p.pitch, aim: this.aimTarget.toArray() });
+  }
+  _hideMeshes(hidden) { for (const mesh of this.modelMeshes || []) mesh.visible = !hidden; }
+  _chaseCamera(pos, yaw, pitch, camera, track, dt) {
+    const forward = direction(yaw, pitch), anchor = pos.clone().add(new THREE.Vector3(0, 2.35, 0));
+    const desired = anchor.clone().addScaledVector(forward, -CAMERA_ARM).add(new THREE.Vector3(0, 1.7, 0));
+    desired.y = Math.max(desired.y, pos.y + 2.7);
+    const min = new THREE.Vector3(Math.min(anchor.x, desired.x) - CAMERA_RADIUS, Math.min(pos.y + 1.4, desired.y) - CAMERA_RADIUS, Math.min(anchor.z, desired.z) - CAMERA_RADIUS);
+    const max = new THREE.Vector3(Math.max(anchor.x, desired.x) + CAMERA_RADIUS, Math.max(anchor.y, desired.y) + CAMERA_RADIUS, Math.max(anchor.z, desired.z) + CAMERA_RADIUS);
+    const boxes = (this.ctx.world.query ? this.ctx.world.query(min, max, []) : this.ctx.world.boxes || []).filter(b => !b.data.disabled && !transparent(b));
+    const contains = (b, p) => ['x', 'y', 'z'].every(a => p[a] > b.min[a] - CAMERA_RADIUS && p[a] < b.max[a] + CAMERA_RADIUS);
+    for (const height of [2.35, 2.1, 1.8, 1.5]) { anchor.y = pos.y + height; if (!boxes.some(b => contains(b, anchor))) break; }
+    const arm = desired.clone().sub(anchor), length = arm.length(); arm.divideScalar(Math.max(length, 1e-6));
+    let limit = length;
+    // Sweep a small camera volume, not just its centre, so wall corners cannot enter the near plane.
+    for (const b of boxes) {
+      let near = 0, far = limit;
+      for (const axis of ['x', 'y', 'z']) {
+        if (Math.abs(arm[axis]) < 1e-8) { if (anchor[axis] < b.min[axis] - CAMERA_RADIUS || anchor[axis] > b.max[axis] + CAMERA_RADIUS) { far = -1; break; } continue; }
+        let a = (b.min[axis] - CAMERA_RADIUS - anchor[axis]) / arm[axis], z = (b.max[axis] + CAMERA_RADIUS - anchor[axis]) / arm[axis];
+        if (a > z) [a, z] = [z, a]; near = Math.max(near, a); far = Math.min(far, z); if (near > far) break;
+      }
+      if (near <= far && far >= 0) limit = Math.max(0, near - .03);
+    }
+    if (track.distance == null || limit < track.distance) track.distance = limit;
+    else track.distance += (limit - track.distance) * (1 - Math.exp(-8 * Math.max(0, dt)));
+    camera.position.copy(anchor).addScaledVector(arm, track.distance); camera.rotation.set(pitch, yaw, 0, 'YXZ'); camera.updateMatrixWorld();
+    this._hideMeshes(track.distance < 2.35);
+    return track.distance;
+  }
+  _shotForTarget(base, target, yaw, pitch) {
+    const breech = (Array.isArray(base) ? vec(base) : base.clone()).add(new THREE.Vector3(0, 1.77, 0));
+    const end = target?.clone?.() || breech.clone().addScaledVector(direction(yaw, pitch), 240);
+    const dir = end.clone().sub(breech); const length = dir.length();
+    if (length < .01) dir.copy(direction(yaw, pitch)); else dir.divideScalar(length);
+    const travel = Math.min(2.45, Math.max(0, length - .04)), muzzleWall = this.ctx.world.raycast(breech, dir, travel, transparent);
+    const pos = breech.clone().addScaledVector(dir, muzzleWall ? Math.max(0, muzzleWall.dist - .04) : travel);
+    const distance = Math.min(240, pos.distanceTo(end)), wall = this.ctx.world.raycast(pos, dir, distance, transparent);
+    return { pos, dir, impact: wall?.point || end, blocked: !!wall && wall.dist < distance - .2 };
+  }
+  updateSpectatorCamera(actorId, camera, dt) {
+    if (!actorId || !this.occupied(actorId)) { this._spectatorTrack = null; return false; }
+    if (this._spectatorTrack?.id !== actorId) this._spectatorTrack = { id: actorId, distance: null };
+    this._chaseCamera(this.display, camera.rotation.y, clamp(camera.rotation.x, -.55, .65), camera, this._spectatorTrack, dt);
+    return true;
   }
   _simulate(body, s, control, dt) {
     const c = control || { throttle: 0, steer: 0, brake: true }, target = c.brake ? 0 : c.throttle * (c.throttle < 0 ? 4 : 8);
@@ -362,7 +432,8 @@ export class TankSystem {
   update(dt) {
     dt = Math.min(.05, Math.max(0, dt));
     if (this._level !== this.ctx.level || this._egg !== this.ctx.level.tankEgg || this._round !== this.round) this.reset();
-    const now = this.now(), s = this.state;
+    const now = this.now(), s = this.state; let poseUpdated = false;
+    this._hideMeshes(false);
     this._events();
     if (!this.authority && this.net.active && now >= this.syncAt) { this._send({ op: 'sync' }); this.syncAt = now + 3000; }
     if (this.authority && s.spawned && s.hp > 0) {
@@ -373,8 +444,13 @@ export class TankSystem {
       const pausedOffline = !this.net.connected && (this.ctx.game.state === 'pause' || this.ctx.game.menu);
       if (pausedOffline) { s.speed = 0; this.body.vel.x = 0; this.body.vel.z = 0; }
       else this._simulate(this.body, s, valid ? input : null, dt);
+      this.display.lerp(this.body.pos, 1 - Math.exp(-24 * dt));
+      if (this.occupied() && this.ctx.player.alive && this._seat) { this._seatPose(this.ctx.player, dt); poseUpdated = true; }
       if (Math.abs(s.speed) >= STOP || (valid && Math.abs(input.steer) > .1)) { this.stillSince = now; this.pulls.clear(); }
-      if (valid) { s.turret = input.yaw; s.pitch = input.pitch; }
+      if (valid) {
+        const aim = input.aim ? vec(input.aim).sub(vec(s.pos).add(new THREE.Vector3(0, 1.77, 0))).normalize() : direction(input.yaw, input.pitch);
+        s.turret = Math.atan2(-aim.x, -aim.z); s.pitch = Math.asin(clamp(aim.y, -1, 1));
+      }
       if (!pausedOffline && this.body.pos.y < (this.ctx.level.fallY ?? -15)) this._destroy(s.driver);
       if (s.hp > 0 && valid && input.fire && this.fireUnlocked && now >= this.fireAt) this._fire();
       for (const [id, hold] of this.pulls) {
@@ -383,7 +459,6 @@ export class TankSystem {
       }
       for (const [key, until] of this.blasts) if (now > until) this.blasts.delete(key);
       if (this._dirty || now >= this.sendAt) this.publish();
-      this.display.lerp(this.body.pos, 1 - Math.exp(-24 * dt));
     } else if (!this.authority && this.occupied() && this.localControl) {
       if (!this.prediction) this.prediction = { body: makeBody(vec(s.pos), HALF, HEIGHT, .62), state: { ...s } };
       const p = this.prediction, difference = p.body.pos.distanceTo(this.body.pos);
@@ -397,10 +472,10 @@ export class TankSystem {
     const heading = !this.authority && this.occupied() && this.prediction ? this.prediction.state.yaw : s.yaw;
     this.displayYaw = angle(this.displayYaw, heading, 1 - Math.exp(-20 * dt));
     this.root.position.copy(this.display); this.root.rotation.y = this.displayYaw;
-    this.turret.rotation.y = (this.occupied() ? this.ctx.player.yaw : s.turret) - this.displayYaw;
-    this.barrel.rotation.x = this.occupied() ? this.ctx.player.pitch : s.pitch;
     this._collider();
-    if (this.occupied() && this.ctx.player.alive && this._seat) this._seatPose(this.ctx.player);
+    if (!poseUpdated && this.occupied() && this.ctx.player.alive && this._seat) this._seatPose(this.ctx.player, dt);
+    this.turret.rotation.y = (this.occupied() ? this.aimYaw ?? this.ctx.player.yaw : s.turret) - this.displayYaw;
+    this.barrel.rotation.x = this.occupied() ? this.aimPitch ?? this.ctx.player.pitch : s.pitch;
     for (const [id, p] of this.remote) {
       const wasHidden = p.vehicleHidden; p.vehicleHidden = this.occupied(id);
       if (p.vehicleHidden) { if (p.root) p.root.visible = false; if (p.nameTag) p.nameTag.hidden = true; p.rope.visible = false; p.hook.visible = false; }
@@ -423,6 +498,8 @@ export class TankSystem {
     if (!playing || (!near && !driving) || this.ctx.hud.el?.board?.hidden === false) { this._ui(null); return; }
     const stopped = this._stopped(), action = driving ? (stopped ? 'exit' : null) : stopped ? (s.driver ? 'hijack' : 'enter') : null;
     this._ui({ hp: Math.ceil(s.hp), maxHp: TANK_HP, driving, speed: Math.abs(s.speed), action, stopped,
+      hullHeading: headingDegrees(this._motion().yaw), aimHeading: headingDegrees(this.occupied() ? this.aimYaw ?? this.ctx.player.yaw : s.turret), reversing: s.speed < -.1,
+      blocked: driving && this.shotBlocked, aimScreen: driving ? this.aimScreen : null,
       progress: this.localHold / PULL, cooldown: Math.max(0, (this.fireAt - now) / 1000) });
   }
   _ui(status) { this.ctx.hud.setTank?.(status); this.ctx.touch?.setVehicle?.(status); }
@@ -438,16 +515,15 @@ export class TankSystem {
   }
   _fire() {
     const s = this.state; this.fireAt = this.now() + FIRE_TIME * 1000;
-    const dir = new THREE.Vector3(-Math.sin(s.turret) * Math.cos(s.pitch), Math.sin(s.pitch), -Math.cos(s.turret) * Math.cos(s.pitch));
-    const pos = vec(s.pos).add(new THREE.Vector3(0, 2.4, 0)), wall = this.ctx.world.raycast(pos, dir, 1.7, transparent);
-    pos.addScaledVector(dir, wall ? Math.max(0, wall.dist - .04) : 1.7);
+    const target = this.inputs.get(s.driver)?.aim, shot = this._shotForTarget(s.pos, target ? vec(target) : null, s.turret, s.pitch), { pos, dir } = shot;
+    s.turret = Math.atan2(-dir.x, -dir.z); s.pitch = Math.asin(clamp(dir.y, -1, 1));
     s.fireSerial = ++this.serial;
     const event = { serial: this.serial, driver: s.driver, epoch: s.epoch, round: s.round, life: s.driverLife || 0, pos: pos.toArray(), dir: dir.toArray() };
     if (this.net.connected) this.net.send('tankfire', event);
     this._fireEvent(event);
   }
   _fireEvent(d) {
-    if (!d || d.epoch !== this.state.epoch || d.round !== this.round || !xyz(d.pos) || !xyz(d.dir) || !Number.isSafeInteger(d.serial)) return;
+    if (!this.state.spawned || this.state.hp <= 0 || !d || d.epoch !== this.state.epoch || d.round !== this.round || !xyz(d.pos) || !xyz(d.dir) || !Number.isSafeInteger(d.serial)) return;
     const key = `${d.epoch}:${d.serial}`; if (key === this.fireSeen || (this.fireEpoch === d.epoch && d.serial <= this.seenSerial)) return;
     this.fireSeen = key; this.fireEpoch = d.epoch; this.seenSerial = d.serial; this.serial = Math.max(this.serial, d.serial);
     this.fireAt = this.now() + FIRE_TIME * 1000;
@@ -473,6 +549,7 @@ export class TankSystem {
     const cannon = new THREE.Mesh(new THREE.CylinderGeometry(.105, .15, 1.95, 10), armor); cannon.rotation.x = Math.PI / 2; cannon.position.z = -.82; barrel.add(cannon);
     box(barrel, 0, 0, -1.78, .33, .25, .26, dark);
     for (const x of [-.87, .87]) box(root, x, 1.01, -1.53, .24, .16, .1, edge);
+    this.modelMeshes = []; root.traverse(mesh => { if (mesh.isMesh) this.modelMeshes.push(mesh); });
     return root;
   }
 }

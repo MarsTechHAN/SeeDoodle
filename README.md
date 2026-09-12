@@ -81,6 +81,10 @@ an ongoing defuse and assign a replacement by walkable route if the current defu
 
 ### Hidden tanks
 
+**Tank Easter eggs** are on by default. Before starting, a solo player or room host can switch
+them off; the host's choice applies to everyone, including late arrivals. With the option off,
+the small hidden props remain ordinary objects and cannot reveal a tank.
+
 Every offered map hides one ordinary-looking service prop. Hit it with a gun, blade or explosion
 to reveal a compact, driveable tank. The tank has **88,888 HP**, a rotating turret and a cannon
 that fires every 1.5 seconds. It occupies one seat; the driver stays protected inside the hull.
@@ -88,6 +92,11 @@ Destroying the hull kills its driver through the normal scoring and respawn rule
 
 Use **H** on keyboard, **D-pad right** on a controller, or the contextual **TANK** touch button
 to enter. Movement controls drive and steer; look controls aim the turret; primary fire shoots.
+The raised chase camera looks past the turret toward the road and retracts near walls. Entering
+aligns the view with the front of the hull; steering carries the view around while preserving
+any offset introduced by manual aiming. The small heading indicator distinguishes hull direction
+from turret aim, labels reversing and warns when the cannon muzzle is blocked.
+A tiny amber marker shows the actual impact point when nearby cover obstructs the cannon.
 Hold **Space** or the touch **BRAKE** button to stop. Leaving requires a stopped tank. Another
 player beside a tank that has stopped for 0.4 seconds can hold the vehicle interaction for
 1.5 seconds to pull the driver out alive. Moving away, releasing the button or the tank moving
