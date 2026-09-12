@@ -393,7 +393,7 @@ const ARMS = {
   katana: { max: 165, base: 55, rate: 3, burst: 4, reach: 4.5 },
   grenadeBash: { max: 55, rate: 3, burst: 4, reach: 4.5 },
   grenade: { max: 93, rate: 1.25, burst: 8, reach: 9.6 * 0.95 },
-  tank: { max: 250, rate: 1 / 1.5, burst: 1, reach: 240 },
+  tank: { max: 250, rate: 1 / 1.5, burst: 1, reach: 240, blastR: 4.8 * 0.95 },
 };
 const shots = { ok: 0, rejected: 0, why: {} };
 const deny = (r) => { shots.rejected++; shots.why[r] = (shots.why[r] || 0) + 1; return false; };
@@ -676,8 +676,25 @@ function resolveHit(client, m) {
     // The grenade stays intact: a bash has neither a fuse nor a charged-knife multiplier.
     if (m.charge !== undefined && m.charge !== 0) return deny('invalid grenade bash charge');
     damageCap = arm.max;
-  }
+  } else if (cannon) damageCap = arm.max;
   if (!(dmg > 0) || dmg > damageCap) return deny('damage out of range');
+  let cannonImpact = null;
+  if (cannon) {
+    // Older clients reported one direct hit without an impact; do not mix that with splash claims.
+    if (cannon.legacyHit || (cannon.impact && m.at === undefined)) return deny('mixed tank impact protocol');
+    const origin = vec3(m.o), dir = vec3(m.d);
+    if (!origin || !dir || len3(sub(origin, cannon.pos)) > .1 || len3(sub(dir, cannon.dir)) > .02) return deny('tank shot changed');
+    if (m.blast !== undefined && typeof m.blast !== 'boolean') return deny('invalid tank blast flag');
+    if (m.at !== undefined) {
+      const at = vec3(m.at), distance = Number(m.r);
+      if (!at || m.at.length !== 3 || !Number.isFinite(distance) || distance < 0) return deny('malformed tank impact');
+      const delta = sub(at, cannon.pos), size = len3(cannon.dir), unit = cannon.dir.map(n => n / size), along = dot3(delta, unit);
+      const offRay = sub(delta, unit.map(n => n * along));
+      if (along < -.2 || along > arm.reach + .2 || len3(offRay) > .2 || Math.abs(distance - along) > .2) return deny('tank impact outside shot');
+      if (cannon.impact && len3(sub(at, cannon.impact)) > .2) return deny('tank impact moved');
+      cannonImpact = cannon.impact || at;
+    } else if (m.blast) return deny('missing tank blast impact');
+  }
   const recordedGrenade = m.k === 'grenade' && m.gid != null;
   let grenade = null;
   if (recordedGrenade) {
@@ -698,6 +715,7 @@ function resolveHit(client, m) {
   if (!seen) return deny('target never reported a position');
   if (!seen.alive) return deny('target already down');
   const target = [seen.x, seen.y, seen.z];
+  if (cannonImpact && len3(sub(cannonImpact, [target[0], target[1] + .9, target[2]])) > arm.blastR + HULL_R) return deny('outside the tank blast');
   // How long the round was in the air: zero unless the room is playing with ballistics, and capped
   // at what the gun could plausibly take to cross its own range.
   const rawT = Number(m.ft);
@@ -707,7 +725,9 @@ function resolveHit(client, m) {
   // `now - tof` on this clock - and plain `now` for an instant shot, which is what it always was.
   const selfNow = whereAt(client, now - tof * 1000);
 
-  if (m.k === 'grenade') {
+  if (cannon && m.blast) {
+    // Splash shares the registered shell's single impact. Nearby victims need not lie on its ray.
+  } else if (m.k === 'grenade') {
     const at = vec3(m.at);
     if (!at) return deny('malformed claim');
     const c = [target[0], target[1] + 0.9, target[2]];
@@ -725,7 +745,6 @@ function resolveHit(client, m) {
   } else {
     const o = vec3(m.o);
     if (!o) return deny('malformed claim');
-    if (cannon && (len3(sub(o, cannon.pos)) > .1 || !vec3(m.d) || len3(sub(m.d, cannon.dir)) > .02)) return deny('tank shot changed');
     if (!cannon && selfNow && len3(sub(o, [selfNow.x, selfNow.y + 0.9, selfNow.z])) > ORIGIN_SLACK) return deny('shot did not start at the shooter');
     const lo = [target[0], target[1] + HULL_LO, target[2]], hi = [target[0], target[1] + HULL_HI, target[2]];
     if (tof > 0) {
@@ -748,8 +767,8 @@ function resolveHit(client, m) {
   }
 
   shots.ok++;
-  if (cannon) cannon.victims.add(victim.id);
-  const from = grenade ? vec3(m.at) : cannon ? cannon.pos : selfNow ? [+selfNow.x.toFixed(1), +(selfNow.y + 0.9).toFixed(1), +selfNow.z.toFixed(1)] : null;
+  if (cannon) { cannon.victims.add(victim.id); if (cannonImpact) cannon.impact = cannonImpact; else cannon.legacyHit = true; }
+  const from = grenade ? vec3(m.at) : cannon ? (m.blast ? cannonImpact : cannon.pos) : selfNow ? [+selfNow.x.toFixed(1), +(selfNow.y + 0.9).toFixed(1), +selfNow.z.toFixed(1)] : null;
   const d = { amount: Math.round(dmg), from, by: client.id, crit: !!m.crit, src: m.k, ...(teamMode(room) ? { round: room.combat.round, life: room.actors.get(victim.id).life } : {}) };
   if (victim.bot) send(room.members.get(room.hostId), { t: 'm', tt: 'bdmg', from: client.id, d: { ...d, id: victim.id } });
   else send(victim, { t: 'm', tt: 'pdmg', from: client.id, d });

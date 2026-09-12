@@ -192,7 +192,10 @@ ctx.hitPlayer = (t, dmg, info) => {
   // that player back to where our screen had them and decides. Send the ray we actually fired so
   // there is something to check it against; the katana has no ray, only a reach.
   const claim = { k: info.source, dmg: Math.round(dmg), crit: !!info.crit, part: info.part || null };
-  if (info.source === 'tank') { claim.sid = info.sid; claim.epoch = info.epoch; }
+  if (info.source === 'tank') {
+    claim.sid = info.sid; claim.epoch = info.epoch;
+    if (info.blastAt) { claim.at = info.blastAt.toArray().map(n => +n.toFixed(3)); claim.blast = !!info.blast; }
+  }
   if (info.source === 'katana' && Number.isFinite(info.charge)) claim.charge = clamp(info.charge, 0, 1);
   if (info.tof > 0 && info.muzzle) {
     // A round that fell on the way there did not travel in a straight line, so there is no ray to
@@ -248,19 +251,37 @@ ctx.tankAimPoint = (origin, dir, range) => {
   for (const hit of [enemy, target]) if (hit && (!nearest || hit.dist < nearest.dist)) nearest = hit;
   return nearest ? nearest.point.clone() : origin.clone().addScaledVector(dir, range);
 };
+const TANK_BLAST_RADIUS = 4.8, TANK_DAMAGE_RADIUS = TANK_BLAST_RADIUS * .95;
 ctx.fireTankCannon = (event) => {
   const origin = new THREE.Vector3().fromArray(event.pos), dir = new THREE.Vector3().fromArray(event.dir).normalize();
   const wall = world.raycast(origin, dir, 240, SEE_THROUGH), enemy = enemies.raycast(origin, dir, 240), target = ctx.raycastPlayers(origin, dir, 240);
   let dist = wall?.dist ?? 240, end = wall?.point ?? origin.clone().addScaledVector(dir, 240), hit = null;
   if (enemy && enemy.dist < dist) { dist = enemy.dist; end = enemy.point; hit = { enemy }; }
   if (target && target.dist < dist) { dist = target.dist; end = target.point; hit = { target }; }
-  effects.tracer(origin, end, INK.ORANGE, .14, .2); effects.boom(end, 2.1); audio.explosion(end);
+  effects.tracer(origin, end, INK.ORANGE, .14, .2); effects.boom(end, TANK_BLAST_RADIUS); audio.explosion(end);
   if (event.driver !== ctx.localPlayerId() || !player.alive || game.state !== 'play') return;
   player.shieldT = 0; player.firing = true;
-  const info = { point: end, dir, part: 'torso', source: 'tank', crit: false, dist, sid: event.serial, epoch: event.epoch };
+  const info = { point: end, dir, part: 'torso', source: 'tank', crit: false, dist, sid: event.serial, epoch: event.epoch, blastAt: end };
   if (hit?.target) ctx.hitPlayer(hit.target.player, 250, info);
-  else if (hit?.enemy) enemies.damage(hit.enemy.enemy, 250, info);
-  else if (wall?.box.data.breakable) ctx.breakHit(wall.box.data.breakable, 250, end, dir);
+  else if (hit?.enemy) enemies.damage(hit.enemy.enemy, 250, { ...info, source: 'blast' });
+  // Start visibility just off the struck surface; cover blocks splash even when the shell hits it.
+  const blastOrigin = end.clone().addScaledVector(dir, -.06);
+  const splashDamage = actor => {
+    const distance = actor.center.distanceTo(end);
+    return distance < TANK_DAMAGE_RADIUS && world.hasLineOfSight(blastOrigin, actor.center, SEE_THROUGH) ? 250 * (1 - .8 * distance / TANK_DAMAGE_RADIUS) : 0;
+  };
+  for (const actor of remote.values()) {
+    if (!actor.alive || actor === hit?.target?.player || !ctx.canHurt(actor)) continue;
+    const damage = splashDamage(actor); if (damage > 0) ctx.hitPlayer(actor, damage, { ...info, blast: true });
+  }
+  for (const actor of enemies.enemies) {
+    if (!actor.alive || actor === hit?.enemy?.enemy) continue;
+    const damage = splashDamage(actor); if (damage > 0) enemies.damage(actor, damage, { ...info, source: 'blast', blast: true });
+  }
+  const directProp = !hit ? wall?.box.data.breakable : null;
+  const blastProps = level.breakables.filter(br => br.alive && br !== directProp && br.pos.distanceTo(end) < TANK_DAMAGE_RADIUS && world.hasLineOfSight(blastOrigin, br.pos, b => SEE_THROUGH(b) || b === br.box));
+  if (directProp) ctx.breakHit(directProp, 250, end, dir);
+  for (const br of blastProps) { if (br.tankEgg && ctx.tankEggsEnabled()) tanks.hitEgg(br); else breakProp(br, br.pos.clone().sub(end).normalize(), true); }
 };
 function breakProp(br, dir, local, quiet = false) {
   if (!br.alive) return; br.alive = false; world.removeBox(br.box);

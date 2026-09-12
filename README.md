@@ -89,6 +89,9 @@ Every offered map hides one ordinary-looking service prop. Hit it with a gun, bl
 to reveal a compact, driveable tank. The tank has **88,888 HP**, a rotating turret and a cannon
 that fires every 1.5 seconds. It occupies one seat; the driver stays protected inside the hull.
 Destroying the hull kills its driver through the normal scoring and respawn rules.
+Shell impacts have a 4.56 m damage radius, half that of grenades, with a 4.8 m visual blast.
+Direct hits retain 250 damage; splash falls from 250 at the centre toward 50 at the edge.
+Solid cover blocks splash, and a direct-hit target is not damaged a second time by the explosion.
 
 Use **H** on keyboard, **D-pad right** on a controller, or the contextual **TANK** touch button
 to enter. Movement controls drive and steer; look controls aim the turret; primary fire shoots.
