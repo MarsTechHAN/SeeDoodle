@@ -123,7 +123,18 @@ class WSConn {
     for (;;) {
       const f = this._readFrame();
       if (!f) break;
-      if (f.opcode === 0x8) { this.close(); return; }              // close
+      if (f.opcode === 0x8) {
+        // The peer named the close. `close()` would otherwise stamp server-close
+        // and a tab refresh would look like we kicked them.
+        let code = 1005, reason = '';
+        if (f.payload.length >= 2) {
+          code = f.payload.readUInt16BE(0);
+          reason = f.payload.slice(2).toString('utf8').replace(/\s+/g, '_').slice(0, 40);
+        }
+        this.why = this.why || ('peer-close:' + code + (reason ? ':' + reason : ''));
+        this.close();
+        return;
+      }
       if (f.opcode === 0x9) { this._write(f.payload, 0xa); continue; } // ping -> pong
       if (f.opcode === 0xa) continue;                              // pong
       if (f.opcode === 0x0) { this.frags.push(f.payload); }        // continuation
@@ -358,14 +369,14 @@ function joinRoom(client, room, meta) {
 // the token it was handed at `hello`. Come back in time and the room is never told anything
 // happened. Miss the window and the ordinary leave path runs, exactly as it did before.
 const GRACE_MS = 12000;      // how long a quiet player keeps their seat
-const HOST_GRACE_MS = 3500;  // the host holds the enemies and the clock, so hand those on sooner
+const HOST_GRACE_MS = 8000;  // one failed resume (1.5s open + 6s request) plus a little slack
 
 function stall(client) {
   const room = client.room;
   if (!room) { clients.delete(client.id); return; }
   client.gone = Date.now();
-  // Battlefield movement is already server-owned; promoting the host in 3.5s
-  // just holes the combat clock. Co-op still needs the short fuse.
+  // Battlefield movement is already server-owned; promoting the host too soon
+  // just holes the combat clock. Co-op still wants the shorter fuse.
   const grace = (room.hostId === client.id && room.mode !== 'battlefield') ? HOST_GRACE_MS : GRACE_MS;
   netlog('stall', { ...seatOf(client), grace });
   toRoom(room, { t: 'stall', id: client.id }, client.id);
@@ -391,8 +402,12 @@ function bind(ws, client) {
   ws.onclose = () => {
     if (client.ws !== ws) return;   // a superseded socket of a seat somebody has already resumed
     if (client.gone) return;        // already quiet; the grace timer owns what happens next
-    netlog('sock-close', seatOf(client));
-    if (client.room) { stall(client); return; }
+    if (client.room) {
+      netlog('sock-close', seatOf(client));
+      stall(client);
+      return;
+    }
+    netlog(client.left ? 'leave-close' : 'hello-close', seatOf(client));
     leaveRoom(client); clients.delete(client.id);
   };
 }
@@ -973,6 +988,7 @@ function onMessage(client, raw) {
     }
 
     case 'leave':
+      client.left = true;
       leaveRoom(client);
       break;
 

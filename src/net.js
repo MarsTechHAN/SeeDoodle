@@ -66,7 +66,7 @@ async function wtSocket(wt) {
         const frame = new Uint8Array(4 + bytes.length);
         new DataView(frame.buffer).setUint32(0, bytes.length, true);
         frame.set(bytes, 4);
-        ctlWriter.write(frame).catch(() => sock.close());
+        ctlWriter.write(frame).catch(() => sock.close({ code: 0, reason: 'wt-write', wasClean: false }));
         return;
       }
       const u8 = data instanceof Uint8Array ? data : new Uint8Array(data);
@@ -77,13 +77,13 @@ async function wtSocket(wt) {
       const frame = new Uint8Array(4 + u8.length);
       new DataView(frame.buffer).setUint32(0, u8.length, true);
       frame.set(u8, 4);
-      ctlWriter.write(frame).catch(() => sock.close());
+      ctlWriter.write(frame).catch(() => sock.close({ code: 0, reason: 'wt-write', wasClean: false }));
     },
-    close() {
+    close(ev) {
       if (sock.readyState === 3) return;
       sock.readyState = 3;
       try { wt.close(); } catch (e) { /* already gone */ }
-      if (sock.onclose) sock.onclose({ code: 0, reason: 'wt-close', wasClean: true });
+      if (sock.onclose) sock.onclose(ev || { code: 0, reason: 'wt-local', wasClean: true });
     },
   };
   const emit = (payload, binary) => {
@@ -106,9 +106,16 @@ async function wtSocket(wt) {
           emit(payload, payload.length > 0 && payload[0] === 0xD1);
         }
       }
-    } catch (e) { /* closed */ }
-    sock.close();
+    } catch (e) {
+      sock.close({ code: 0, reason: 'wt-error:' + (e && e.message || 'err'), wasClean: false });
+      return;
+    }
+    sock.close({ code: 0, reason: 'wt-eof', wasClean: false });
   };
+  wt.closed.then(
+    (info) => sock.close({ code: (info && info.closeCode) || 0, reason: (info && info.reason) || 'wt-closed', wasClean: true }),
+    (e) => sock.close({ code: 0, reason: 'wt-closed:' + (e && e.message || 'err'), wasClean: false }),
+  );
   pumpCtl();
   if (dgramWriter) {
     (async () => {
@@ -142,13 +149,18 @@ export class Net {
     this._seq = 0; this._ack = 0; this._ackBits = 0; this._pred = []; this._inTick = 0;
     this._wt = null; this._wtWrite = null;
     this._logs = [];
+    this._closing = false;
   }
   // Close codes and resume failures die with the tab unless we keep a short ring and
   // POST them back. The room process greps `NET client` for the same events.
   _netlog(event, extra = {}) {
+    const seat = this._resumeSeat;
     const row = {
-      t: Date.now(), event, path: this.path, id: this.id, code: this.code,
-      connected: this.connected, authority: this.authority, inMatch: this._inMatch, ...extra,
+      t: Date.now(), event, path: this.path,
+      id: (this.resuming && seat && seat.id) || this.id,
+      code: (this.resuming && seat && seat.code) || this.code,
+      connected: this.connected, authority: this.authority, inMatch: this._inMatch,
+      resuming: this.resuming, ...extra,
     };
     this._logs.push(row);
     if (this._logs.length > 40) this._logs.shift();
@@ -204,6 +216,7 @@ export class Net {
     sock.onmessage = (ev) => this._onMessage(ev.data);
     sock.onclose = (ev) => this._onClose(ev);
     sock.onerror = () => { this._netlog('sock-error', { rs: sock.readyState }); };
+    this._closing = false;
     this.path = path || 'websocket';
     this._raw({ t: 'ping', d: performance.now() });
     this._pingT = setInterval(() => this._raw({ t: 'ping', d: performance.now() }), 5000);
@@ -223,12 +236,17 @@ export class Net {
     return sock;
   }
   _close() {
+    this._closing = true;
     clearInterval(this._pingT); this._pingT = null;
     if (this._wt) { try { this._wt.close(); } catch (e) { /* already gone */ } this._wt = null; this._wtWrite = null; }
     const s = this.sock; this.sock = null;
-    if (s && s.readyState === 1) { try { s.close(); } catch (e) { /* ignore */ } }
+    if (s) {
+      s.onclose = null; s.onerror = null;
+      if (s.readyState === 1) { try { s.close(); } catch (e) { /* ignore */ } }
+    }
     for (const [, w] of this._waits) w.reject(new Error('disconnected from the server'));
     this._waits.clear();
+    this._closing = false;
   }
   async _ensure(timeout = OPEN_TIMEOUT) {
     if (this.sock && this.sock.readyState === 1) return;
@@ -269,10 +287,13 @@ export class Net {
     return this._opening;
   }
   _onClose(ev) {
-    this._netlog('sock-close', {
-      close: ev && ev.code, why: ev && ev.reason, clean: ev && ev.wasClean,
-      rs: ev && ev.target && ev.target.readyState, resuming: this.resuming,
-    });
+    if (this._closing) return;
+    if (this.connected || this.resuming) {
+      this._netlog('sock-close', {
+        close: ev && ev.code, why: ev && ev.reason, clean: ev && ev.wasClean,
+        rs: ev && ev.target && ev.target.readyState, resuming: this.resuming,
+      });
+    }
     this.sock = null; clearInterval(this._pingT); this._pingT = null;
     for (const [, w] of this._waits) w.reject(new Error('lost the connection to the server'));
     this._waits.clear();
@@ -305,6 +326,7 @@ export class Net {
       return;
     } catch (e) { this._netlog('retry-resume-fail', { n, why: e.message }); }
     if (!this.resuming) return;
+    if (!this.sock || this.sock.readyState !== 1) { this._retry(n + 1); return; }
     if (!seat.code) { this._giveUp('lost the connection to the server'); return; }
     try {
       const res = await this._request({ t: 'join', code: seat.code, name: this._hostName, meta: { ...this._meta, prev: seat.id } }, 'join');
@@ -313,6 +335,7 @@ export class Net {
     } catch (e) { this._netlog('retry-join-fail', { n, why: e.message }); this._retry(n + 1); }
   }
   _back(res, isHost) {
+    if (!this.resuming) return;
     const oldHost = this.hostId, wasHost = this.isHost;
     this._adopt(res, isHost);
     this.resuming = false; this._resumeSeat = null;
@@ -328,6 +351,7 @@ export class Net {
   }
   // one in-flight request per kind; the reply carries `for` so it can be matched back
   _request(msg, kind, timeoutMs = REQ_TIMEOUT) {
+    if (!this.sock || this.sock.readyState !== 1) return Promise.reject(new Error('lost the connection to the server'));
     return new Promise((resolve, reject) => {
       const key = kind + ':' + (++this._waitSeq);
       const timer = setTimeout(() => { this._waits.delete(key); reject(new Error('the server did not answer')); }, timeoutMs);
@@ -376,7 +400,8 @@ export class Net {
     switch (m.t) {
       case 'hello':
         if (m.wire !== WIRE) { this._netlog('wire-stale', { got: m.wire, want: WIRE }); this._close(); this._giveUp(WIRE_STALE); break; }
-        this.id = m.id; if (m.token) this.token = m.token; if (m.max) this.maxPlayers = m.max;
+        if (!this.resuming) { this.id = m.id; if (m.token) this.token = m.token; }
+        if (m.max) this.maxPlayers = m.max;
         if (m.battlefieldMax) this.battlefieldMax = m.battlefieldMax;
         if (m.path && this.path === 'offline') this.path = m.path;
         this._syncClock(m.now); break;
@@ -490,6 +515,8 @@ export class Net {
   }
   leave() {
     this.resuming = false; this._resumeSeat = null;   // whatever we were going back for, we no longer want it
+    for (const [, w] of this._waits) w.reject(new Error('left the room'));
+    this._waits.clear();
     if (this.sock && this.sock.readyState === 1 && this.connected) this._raw({ t: 'leave' });
     this.connected = false; this.isHost = false; this.conns.clear();
     this.code = null; this.hostId = null; this.aliasCode = null; this._inMatch = false;
