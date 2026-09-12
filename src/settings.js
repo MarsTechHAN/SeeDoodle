@@ -39,7 +39,7 @@ export const WEAPON_MODES = {
   normal: { key: 'normal', name: 'NORMAL', blurb: 'all weapons and grenades', weapons: ['rifle', 'shotgun', 'sniper', 'katana', 'rocket', 'revolver'], grenades: true, infiniteGrenades: false },
   no_sniper: { key: 'no_sniper', name: 'NO SNIPERS', blurb: 'all weapons except the sniper rifle', weapons: ['rifle', 'shotgun', 'katana', 'rocket', 'revolver'], grenades: true, infiniteGrenades: false },
   grenades: { key: 'grenades', name: 'GRENADES ONLY', blurb: 'unlimited grenades - no guns or knives', weapons: ['grenade'], grenades: true, infiniteGrenades: true },
-  knives: { key: 'knives', name: 'KNIVES ONLY', blurb: 'katana only - no guns or grenades', weapons: ['katana'], grenades: false, infiniteGrenades: false },
+  knives: { key: 'knives', name: 'KNIVES ONLY', blurb: 'katana and unlimited grenades - no guns', weapons: ['katana'], grenades: true, infiniteGrenades: true },
 };
 export const weaponModeOf = (k) => Object.hasOwn(WEAPON_MODES, k) ? WEAPON_MODES[k] : WEAPON_MODES.normal;
 

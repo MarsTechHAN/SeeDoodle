@@ -348,7 +348,7 @@ const tips = () => [
   t`hold <b>${hud.key('grapple')}</b> to reel in · tap it again to let go mid-swing`,
   player.weaponAllowed('katana') ? t`block with <b>${hud.key('block')}</b> and some of their bullets go back at them` : ts('hold fire or grenade to aim - release to throw'),
   ts('kills in the air are worth more · stay off the floor'),
-  player.infiniteGrenades ? ts('unlimited grenades - hold fire and release to throw') : player.grenadesAllowed ? t`<b>${hud.key('grenade')}</b> lobs a grenade · pickups give you more` : ts('slash · hold aim to block & return bullets'),
+  player.infiniteGrenades ? t`unlimited grenades - hold <b>${hud.key('grenade')}</b> to aim, release to throw` : player.grenadesAllowed ? t`<b>${hud.key('grenade')}</b> lobs a grenade · pickups give you more` : ts('slash · hold aim to block & return bullets'),
   t`press <b>${hud.key('jump')}</b> again in the air for a double jump`,
 ];
 const bossFor = (n) => BOSSES[(Math.floor(n / 5) - 1) % BOSSES.length];

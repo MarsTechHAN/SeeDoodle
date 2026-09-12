@@ -157,7 +157,7 @@ export class TouchControls {
     if (mode === this._weaponMode) return; this._weaponMode = mode; this.clearAim();
     const grenades = mode === 'grenades', knives = mode === 'knives';
     for (const action of ['grenade', 'melee', 'reload', 'aim']) {
-      const hidden = action === 'grenade' ? knives : action === 'melee' || action === 'aim' ? grenades : grenades || knives;
+      const hidden = action === 'grenade' ? false : action === 'melee' || action === 'aim' ? grenades : grenades || knives;
       for (const el of this.btnEls[action] || []) el.classList.toggle('gone', hidden);
       if (hidden) delete this.frames[action];
     }
