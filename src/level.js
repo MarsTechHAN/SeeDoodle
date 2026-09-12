@@ -20,11 +20,12 @@ export const LEVELS = [
   { key: 'yuanmingyuan', name: 'OLD SUMMER PALACE', blurb: 'Great Fountain ruins, carved stone and garden paths', team: true, reference: 'https://en.wikipedia.org/wiki/Old_Summer_Palace', referenceName: 'Old Summer Palace', note: 'Western Mansions ruins - garden routes adapted for play' },
   { key: 'greatwall', name: 'THE GREAT WALL', blurb: 'Mutianyu watchtowers, ridge stairs and mountain trails', team: true, reference: 'https://whc.unesco.org/en/list/438/', referenceName: 'The Great Wall', note: 'Mutianyu-inspired ridge - linked wall and mountain routes' },
   { key: 'lombard', name: 'LOMBARD STREET', blurb: 'eight hairpin turns, hillside gardens and bay views', team: true, reference: 'https://en.wikipedia.org/wiki/Lombard_Street_(San_Francisco)', referenceName: 'Lombard Street', note: 'Hyde to Leavenworth - eight bends and a 34 m descent' },
+  { key: 'dinghao', name: 'DINGHAO DH3', blurb: 'Zhongguancun marble, glass lifts and a six-floor atrium', team: true, reference: 'https://en.wikipedia.org/wiki/Zhongguancun', referenceName: 'Zhongguancun', note: 'Dinghao DH3 Block B - lobby and lifts adapted for play' },
   ...(MEXICO_READY ? [{ key: 'mexico', name: 'DOODLE MEXICO', blurb: 'a sun-baked plaza · piñatas, tacos and mariachi' }] : []),
 ];
 
 function createBuilder(scene, world) {
-  const geos = {}; const L = { rings: [], spawns: [], snipers: [], pickups: [], animated: [], meshes: [], playerStart: new THREE.Vector3(0, 0, 42), bounds: { minX: -55, maxX: 55, minZ: -55, maxZ: 55 }, arenaSpawns: [], grappleMovers: [], breakables: [], key: 'district' };
+  const geos = {}; const L = { rings: [], spawns: [], snipers: [], pickups: [], animated: [], meshes: [], playerStart: new THREE.Vector3(0, 0, 42), bounds: { minX: -55, maxX: 55, minZ: -55, maxZ: 55 }, arenaSpawns: [], grappleMovers: [], breakables: [], lifts: [], conveyors: [], buttons: [], doors: [], key: 'district' };
   // Keep semantic surfaces separate when merging; the classic shader still uses only the ink.
   const addGeo = (g, ink, surface = 'ink', classicOnly = false) => {
     const key = `${ink}:${surface}:${classicOnly}`;
@@ -121,7 +122,13 @@ function createBuilder(scene, world) {
       L.animated.push({ mesh: m, update: (t) => { const a = t * sp + ph; m.position.set(Math.cos(a) * r, h + Math.sin(a * 2.3) * 3, Math.sin(a) * r * 0.7); m.lookAt(Math.cos(a + 0.05) * r, h + Math.sin((a + 0.05) * 2.3) * 3, Math.sin(a + 0.05) * r * 0.7); m.rotateZ(Math.sin(a * 3) * 0.6); } });
     }
   }
-  return { L, addGeo, collider, box, slab, wallX, wallZ, stairs, rail, cyl, sphere, ring, spawn, sniper, pickup, finish, planes, scene, world };
+  function breakable(kind, x, y, z, w, h, d, build, o = {}) {
+    let g = null;
+    if (scene) { g = new THREE.Group(); build(g); g.position.set(x, y, z); scene.add(g); L.meshes.push(g); }
+    const br = { id: L.breakables.length, kind, group: g, hp: o.hp ?? 1, pos: new THREE.Vector3(x, y + h / 2, z), alive: true, ink: o.ink ?? INK.TEAL, box: null };
+    br.box = collider(x, y, z, w, h, d, { noNav: o.noNav !== false }); br.box.data.breakable = br; L.breakables.push(br); return br;
+  }
+  return { L, addGeo, collider, box, slab, wallX, wallZ, stairs, rail, cyl, sphere, ring, spawn, sniper, pickup, finish, planes, breakable, scene, world };
 }
 
 // ============================ map 1: Doodle District ============================
@@ -2616,9 +2623,963 @@ function populateMatchSpawns(L, world) {
   return L;
 }
 
+// ============================ Dinghao DH3 ============================
+// Zhongguancun Block B: a marble lobby, an escalator to the lift hall, then four
+// office floors around a glass atrium. The real building is taller; six floors
+// keep every landing in a fight and make a drop from the rim matter.
+function buildDinghao(B) {
+  const { L, box, slab, wallX, wallZ, stairs, rail, cyl, sphere, collider, addGeo, spawn, sniper, pickup, breakable, ring, scene } = B;
+  const FH = 4.2, FLOORS = [0, 4.2, 8.4, 12.6, 16.8, 21.0], TOP = 25.2;
+  const X1 = -18, X2 = 18, Z1 = -16, Z2 = 16;
+  const AX1 = -5, AX2 = 5, AZ1 = -1, AZ2 = 7;
+  const pale = { surface: 'ceramic', ink: INK.BLACK }, stone = { surface: 'stone', ink: INK.BLACK };
+  const dark = { surface: 'metal', ink: INK.BLACK }, wood = { surface: 'wood', ink: INK.BROWN };
+  const detail = { noCollide: true, noNav: true };
+  // The pad used to die at the north curb. Zhongguancun around DH3 is a block, not a courtyard.
+  L.key = 'dinghao'; L.bounds = { minX: -68, maxX: 68, minZ: -48, maxZ: 78 }; L.navCell = 1.2; L.fallY = -4;
+  L.previewCam = { target: [0, 6, 22], radius: 96, height: 40, speed: 0.012 };
+  L.zones = [
+    { name: 'PLAZA', x: 0, z: 32, bounds: { minX: -36, maxX: 36, minZ: 16, maxZ: 50 } },
+    { name: 'NORTH STREET', x: 0, z: 62, bounds: { minX: -50, maxX: 50, minZ: 50, maxZ: 76 } },
+    { name: 'WEST MARKET', x: -52, z: 28, bounds: { minX: -66, maxX: -38, minZ: 8, maxZ: 52 } },
+    { name: 'SOUTH ALLEY', x: 0, z: -32, bounds: { minX: -40, maxX: 40, minZ: -46, maxZ: -16 } },
+    { name: 'MARBLE HALL', x: 0, z: 6, bounds: { minX: X1, maxX: X2, minZ: -2, maxZ: Z2 } },
+    { name: 'LIFT HALL', x: 0, z: -10, bounds: { minX: -12, maxX: 12, minZ: Z1, maxZ: 2 } },
+    { name: 'ATRIUM', x: 0, z: 3, bounds: { minX: AX1, maxX: AX2, minZ: AZ1, maxZ: AZ2 } },
+    { name: 'OFFICES', x: 0, z: 10, bounds: { minX: X1, maxX: X2, minZ: 7, maxZ: Z2 } },
+  ];
+  L.tactical = {
+    buildings: [
+      { x1: X1, z1: Z1, x2: X2, z2: Z2 }, { x1: 18, z1: -8, x2: 22, z2: 8 },
+      { x1: -61, z1: 24, x2: -47, z2: 40 }, { x1: 48, z1: 28, x2: 60, z2: 40 }, { x1: -6, z1: 60, x2: 6, z2: 68 },
+    ],
+    water: [],
+    paths: [[[-28, 18], [28, 18], [28, 46], [-28, 46]], [[-4, 16], [-4, 72], [4, 72], [4, 16]], [[-60, 28], [-18, 28]], [[18, 28], [60, 28]]],
+    labels: L.zones.map(({ name, x, z }) => ({ name, x, z, small: name === 'ATRIUM' || name === 'LIFT HALL' || name === 'SOUTH ALLEY' })),
+  };
+  L.referenceNotes = 'Dinghao DH3 Block B, Zhongguancun: west-north door, escalator to 2F, turnstiles and the lift hall. Six floors and the atrium are a playable compression of the real tower.';
+
+  // F1 slab is solid so the atrium looks down onto marble. Upper floors are a ring around the hole.
+  // Cars sit at x=±4.6, z=-13.35; landing edge is z=-12 so the old 0.35 m pit at the door is gone.
+  slab(X1 - 0.4, Z1 - 0.4, X2 + 0.4, Z2 + 0.4, 0, 0.28, stone);
+  const floorRing = (y, fi) => {
+    slab(X1, -12.0, X2, AZ1, y, 0.28, stone);
+    slab(X1, Z1, -5.95, -12.0, y, 0.28, stone);
+    slab(-3.25, Z1, 3.25, -12.0, y, 0.28, stone);
+    slab(5.95, Z1, X2, -12.0, y, 0.28, stone);
+    slab(AX2, AZ1, X2, AZ2, y, 0.28, stone);
+    if (fi === 1) {
+      slab(X1, 10.05, X2, Z2, y, 0.28, stone);
+      slab(X1, AZ2, -14.35, 10.05, y, 0.28, stone);
+      slab(-9.25, AZ2, X2, 10.05, y, 0.28, stone);
+      slab(X1, AZ1, -14.35, AZ2, y, 0.28, stone);
+      slab(-9.25, AZ1, AX1, AZ2, y, 0.28, stone);
+      slab(-14.35, AZ1, -9.25, 0.15, y, 0.28, stone);
+    } else {
+      slab(X1, AZ2, X2, Z2, y, 0.28, stone);
+      slab(X1, AZ1, AX1, AZ2, y, 0.28, stone);
+    }
+  };
+  for (let i = 1; i < 6; i++) floorRing(FLOORS[i], i);
+  slab(X1 - 0.5, Z1 - 0.5, X2 + 0.5, Z2 + 0.5, TOP, 0.32, { ...dark, noNav: true });
+
+  const glassPane = (x, y, z, w, h, d) => breakable('glass', x, y, z, w, h, d, (g) => {
+    g.add(new THREE.Mesh(new THREE.BoxGeometry(w, h, d).translate(0, h / 2, 0), makeInkMaterial({ ink: INK.TEAL, surface: 'glass' })));
+    const t = 0.045, ink = makeInkMaterial({ ink: INK.BLACK, surface: 'metal' });
+    const ax = Math.abs(w) >= Math.abs(d);
+    const fw = ax ? w : t, fd = ax ? t : d;
+    g.add(new THREE.Mesh(new THREE.BoxGeometry(fw, t, fd).translate(0, h - t / 2, 0), ink));
+    g.add(new THREE.Mesh(new THREE.BoxGeometry(fw, t, fd).translate(0, t / 2, 0), ink));
+    if (ax) { g.add(new THREE.Mesh(new THREE.BoxGeometry(t, h, fd).translate(-w / 2 + t / 2, h / 2, 0), ink)); g.add(new THREE.Mesh(new THREE.BoxGeometry(t, h, fd).translate(w / 2 - t / 2, h / 2, 0), ink)); }
+    else { g.add(new THREE.Mesh(new THREE.BoxGeometry(fw, h, t).translate(0, h / 2, -d / 2 + t / 2), ink)); g.add(new THREE.Mesh(new THREE.BoxGeometry(fw, h, t).translate(0, h / 2, d / 2 - t / 2), ink)); }
+  }, { hp: 20, ink: INK.TEAL });
+
+  const COL_X = [-18, -14.4, -10.8, -7.2, -3.6, 0, 3.6, 7.2, 10.8, 14.4, 18];
+  const COL_Z = [-16, -12.4, -8.8, -5.2, -1.6, 1.6, 5.2, 8.8, 12.4, 16];
+  const NCOL = [-18, -14.4, -10.8, -7.2, -3.6, 3.6, 7.2, 10.8, 14.4, 18];
+  const col = (x, z) => box(x, 0, z, 0.64, TOP, 0.64, pale);
+  for (const x of [X1, X2]) for (const z of [Z1, Z2]) col(x, z);
+  for (const x of COL_X) {
+    if (x === X1 || x === X2) continue;
+    col(x, Z1);
+    if (x > -3.6 && x < 3.6) continue;
+    col(x, Z2);
+  }
+  for (const z of COL_Z) {
+    if (z === Z1 || z === Z2) continue;
+    col(X1, z);
+    if (z > -5.0 && z < -3.2) continue;
+    col(X2, z);
+  }
+  // Jambs sit on the stair landing, not in the middle of the east face.
+  col(X2, -5.0); col(X2, -3.2);
+
+  const spanX = (x1, x2, z, y) => { if (x2 - x1 > 0.4) box((x1 + x2) / 2, y, z, x2 - x1, 0.32, 0.4, stone); };
+  const spanZ = (z1, z2, x, y) => { if (z2 - z1 > 0.4) box(x, y, (z1 + z2) / 2, 0.4, 0.32, z2 - z1, stone); };
+  for (let i = 0; i < FLOORS.length; i++) {
+    const y = FLOORS[i];
+    spanX(X1, X2, Z1, y);
+    if (i === 0) { spanX(X1, -3.6, Z2, y); spanX(3.6, X2, Z2, y); }
+    else spanX(X1, X2, Z2, y);
+    spanZ(Z1, Z2, X1, y);
+    spanZ(Z1, -5.0, X2, y); spanZ(-3.2, Z2, X2, y);
+  }
+
+  const PANE_H = 3.35, PY = (i) => FLOORS[i] + 0.42;
+  // One pane per north bay (3.3) so the plaza photo reads as a curtain; F1 door bay left open.
+  for (let fi = 0; fi < 6; fi++) {
+    const y = PY(fi);
+    for (let i = 0; i < NCOL.length - 1; i++) {
+      const a = NCOL[i], b = NCOL[i + 1], wide = b - a > 4;
+      if (wide && fi === 0) continue;
+      glassPane((a + b) / 2, y, Z2 + 0.12, wide ? 6.9 : 3.3, PANE_H, 0.08);
+    }
+  }
+  // South is all glass (lifts open on the interior, not this wall). West pairs bays so the
+  // four-face count stays under ~160; east only glazes the stubs beyond the stair tower.
+  for (let fi = 0; fi < 6; fi++) {
+    const y = PY(fi);
+    for (let i = 0; i < COL_X.length - 1; i++) glassPane((COL_X[i] + COL_X[i + 1]) / 2, y, Z1 - 0.12, 3.3, PANE_H, 0.08);
+    for (const [a, b] of [[-16, -8.8], [-8.8, -1.6], [-1.6, 1.6], [1.6, 8.8], [8.8, 16]]) {
+      glassPane(X1 - 0.12, y, (a + b) / 2, 0.08, PANE_H, Math.min(b - a - 0.28, 6.9));
+    }
+    glassPane(X2 + 0.12, y, -12.4, 0.08, PANE_H, 6.9);
+    glassPane(X2 + 0.12, y, 8.8, 0.08, PANE_H, 6.4);
+    glassPane(X2 + 0.12, y, 12.4, 0.08, PANE_H, 6.9);
+  }
+
+  // Canopy hangs over the north walk; posts sit outside the 4 m door lane.
+  box(0, 3.15, 17.6, 10.5, 0.22, 3.4, dark);
+  box(-4.7, 0, 18.85, 0.22, 3.15, 0.22, dark);
+  box(4.7, 0, 18.85, 0.22, 3.15, 0.22, dark);
+  box(0, 3.15, 16.4, 0.2, 0.9, 0.2, { ...wood, ...detail });
+  box(-0.55, 5.55, 16.55, 0.55, 1.35, 0.12, { ...wood, ...detail });
+  box(0.15, 5.15, 16.55, 1.15, 0.18, 0.12, { ...wood, ...detail });
+  box(0.15, 5.75, 16.55, 1.15, 0.18, 0.12, { ...wood, ...detail });
+  box(0.15, 6.35, 16.55, 1.15, 0.18, 0.12, { ...wood, ...detail });
+  if (scene) {
+    if (!buildDinghao.sign) {
+      const canvas = document.createElement('canvas'); canvas.width = 1024; canvas.height = 256;
+      const c = canvas.getContext('2d');
+      c.fillStyle = '#c9b089'; c.fillRect(0, 0, 1024, 256);
+      c.fillStyle = '#1a1008';
+      c.font = 'bold 156px sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle';
+      c.fillText('3  鼎  好', 512, 90);
+      c.font = 'bold 76px sans-serif'; c.fillText('DH3', 512, 196);
+      buildDinghao.sign = new THREE.CanvasTexture(canvas);
+    }
+    box(8.55, 3.55, 16.2, 9.0, 2.35, 0.1, { ...wood, ...detail });
+    const signG = new THREE.PlaneGeometry(8.6, 2.15); signG.translate(8.55, 4.72, 16.28);
+    const signM = new THREE.Mesh(signG, makeInkMaterial({ surface: 'screen', ink: INK.BROWN, map: buildDinghao.sign }));
+    signM.matrixAutoUpdate = false; scene.add(signM); L.meshes.push(signM);
+  } else {
+    box(8.55, 3.55, 16.2, 9.0, 2.35, 0.1, { ...wood, ...detail });
+  }
+
+  // Street floor plus stone pads. Joints are ink only so nav stays open.
+  box(0, -1, 16, 148, 1, 140);
+  box(0, 0.02, 33, 70, 0.03, 34, { ...stone, ...detail });
+  box(0, 0.02, 62, 58, 0.03, 24, { ...stone, ...detail });
+  box(-50, 0.02, 28, 24, 0.03, 40, { ...stone, ...detail });
+  box(50, 0.02, 28, 24, 0.03, 40, { ...stone, ...detail });
+  box(0, 0.02, -32, 54, 0.03, 26, { ...stone, ...detail });
+  for (let x = -28; x <= 28; x += 3.2) box(x, 0.045, 32, 0.045, 0.012, 30, { ...pale, ...detail });
+  for (let z = 18; z <= 46; z += 3.2) box(0, 0.045, z, 56, 0.012, 0.045, { ...pale, ...detail });
+  for (let x = -20; x <= 20; x += 4) box(x, 0.04, 52.2, 1.7, 0.012, 0.32, { surface: 'cloth', ink: INK.ORANGE, ...detail });
+
+  const planter = (x, z, w = 2.2, d = 1.1) => {
+    box(x, 0, z, w, 0.55, d, { ...dark, noNav: true });
+    box(x, 0.55, z, w - 0.18, 0.22, d - 0.18, { surface: 'foliage', ink: INK.GREEN, ...detail });
+    sphere(x, 1.35, z, 0.42, { ink: INK.GREEN, surface: 'foliage' });
+    sphere(x + w * 0.28, 1.15, z, 0.28, { ink: INK.GREEN, surface: 'foliage' });
+  };
+  const lamp = (x, z) => {
+    cyl(x, 0, z, 0.1, 5.4, { ...dark, noNav: true });
+    sphere(x, 5.55, z, 0.24, { ink: INK.ORANGE, surface: 'metal' });
+  };
+  const bollard = (x, z) => cyl(x, 0, z, 0.11, 0.95, { ...dark, noNav: true });
+  const kiosk = (x, z, w = 1.7, d = 1.4) => {
+    box(x, 0, z, w, 2.4, d, { ...dark, noNav: true });
+    box(x, 2.4, z, w + 0.22, 0.12, d + 0.22, { ...dark, ...detail });
+    box(x, 1.15, z + d * 0.42, w * 0.62, 0.85, 0.05, { surface: 'glass', ink: INK.TEAL, ...detail });
+  };
+  const newsbox = (x, z) => {
+    box(x, 0, z, 0.48, 1.08, 0.4, { ...dark, noNav: true });
+    box(x, 0.58, z + 0.16, 0.38, 0.36, 0.04, { surface: 'glass', ink: INK.ORANGE, ...detail });
+  };
+  const bikeRack = (x, z, n = 5) => {
+    for (let i = 0; i < n; i++) {
+      const px = x + i * 0.58;
+      cyl(px - 0.13, 0, z, 0.03, 0.86, { ...dark, noNav: true });
+      cyl(px + 0.13, 0, z, 0.03, 0.86, { ...dark, noNav: true });
+      box(px, 0.82, z, 0.34, 0.05, 0.06, { ...dark, noNav: true });
+    }
+  };
+  const inkMesh = (geo, ink, surface = 'ink') => new THREE.Mesh(geo, makeInkMaterial({ ink, surface }));
+  const pot = (x, z, big = false) => breakable('pot', x, 0, z, big ? 1.2 : 0.9, big ? 1.3 : 0.9, big ? 1.2 : 0.9, (g) => {
+    const r = big ? 0.55 : 0.4, h = big ? 1.2 : 0.85;
+    g.add(inkMesh(new THREE.CylinderGeometry(r * 0.75, r, h, 9).translate(0, h / 2, 0), INK.ORANGE, 'ceramic'));
+    g.add(inkMesh(new THREE.SphereGeometry(r * 0.55, 8, 6).translate(0, h + 0.22, 0), INK.GREEN, 'foliage'));
+  }, { hp: 1, ink: INK.ORANGE });
+  const crate = (x, z) => breakable('crate', x, 0, z, 1.1, 1.1, 1.1, (g) => {
+    g.add(inkMesh(new THREE.BoxGeometry(1.1, 1.1, 1.1).translate(0, 0.55, 0), INK.BLUE, 'wood'));
+    for (const k of [-1, 1]) g.add(inkMesh(new THREE.BoxGeometry(1.14, 0.12, 0.12).translate(0, 0.55 + k * 0.35, 0.56), INK.BLACK, 'metal'));
+  }, { hp: 30, ink: INK.BLUE });
+  const barrel = (x, z) => breakable('barrel', x, 0, z, 1.1, 1.2, 1.1, (g) => {
+    g.add(inkMesh(new THREE.CylinderGeometry(0.5, 0.45, 1.2, 10).translate(0, 0.6, 0), INK.ORANGE, 'metal'));
+    for (const y of [0.25, 0.95]) g.add(inkMesh(new THREE.TorusGeometry(0.5, 0.04, 4, 14).rotateX(Math.PI / 2).translate(0, y, 0), INK.BLACK, 'metal'));
+  }, { hp: 30, ink: INK.ORANGE });
+  const vend = (x, z) => breakable('crate', x, 0, z, 0.88, 1.85, 0.72, (g) => {
+    g.add(inkMesh(new THREE.BoxGeometry(0.88, 1.85, 0.72).translate(0, 0.925, 0), INK.BLUE, 'metal'));
+    g.add(inkMesh(new THREE.BoxGeometry(0.62, 1.15, 0.06).translate(0, 1.05, 0.34), INK.TEAL, 'glass'));
+  }, { hp: 18, ink: INK.BLUE });
+  // Posts + roof + four panes: smash a side and the booth is a doorway.
+  const booth = (x, z) => {
+    for (const [dx, dz] of [[-0.5, -0.5], [0.5, -0.5], [-0.5, 0.5], [0.5, 0.5]]) cyl(x + dx, 0, z + dz, 0.05, 2.35, { ...dark, noNav: true });
+    box(x, 2.35, z, 1.25, 0.1, 1.25, dark);
+    glassPane(x, 0.15, z + 0.56, 1.05, 2.1, 0.05);
+    glassPane(x, 0.15, z - 0.56, 1.05, 2.1, 0.05);
+    glassPane(x + 0.56, 0.15, z, 0.05, 2.1, 1.05);
+    glassPane(x - 0.56, 0.15, z, 0.05, 2.1, 1.05);
+  };
+  const shelter = (cx, cz) => {
+    for (const [sx, sz] of [[-1.55, -1.05], [1.55, -1.05], [-1.55, 1.05], [1.55, 1.05]]) cyl(cx + sx, 0, cz + sz, 0.07, 2.55, { ...dark, noNav: true });
+    box(cx, 2.55, cz, 3.5, 0.1, 2.5, dark);
+    glassPane(cx, 0.12, cz - 1.12, 3.15, 2.3, 0.07);
+    glassPane(cx - 1.62, 0.12, cz, 0.07, 2.3, 1.95);
+    box(cx, 0.02, cz, 3.2, 0.08, 2.1, { ...pale, ...detail });
+    box(cx, 0.48, cz + 0.15, 2.7, 0.42, 0.42, { ...dark, noNav: true });
+  };
+  // faces: smashable ground-floor panes stuck on the street side. The tower stays solid.
+  const neighbor = (x, z, w, d, h, faces = '') => {
+    box(x, 0, z, w, h, d, { surface: 'glass', ink: INK.TEAL, noNav: true });
+    box(x, h, z, w + 0.36, 0.22, d + 0.36, { ...dark, ...detail });
+    for (let y = 3.8; y < h - 1.6; y += 3.8) box(x, y, z, w + 0.05, 0.16, d + 0.05, { ...dark, ...detail });
+    const gh = 2.55, gw = Math.min(w - 0.45, 5.4), gd = Math.min(d - 0.45, 5.4);
+    if (faces.includes('n')) glassPane(x, 0.12, z + d / 2 + 0.05, gw, gh, 0.07);
+    if (faces.includes('s')) glassPane(x, 0.12, z - d / 2 - 0.05, gw, gh, 0.07);
+    if (faces.includes('e')) glassPane(x + w / 2 + 0.05, 0.12, z, 0.07, gh, gd);
+    if (faces.includes('w')) glassPane(x - w / 2 - 0.05, 0.12, z, 0.07, gh, gd);
+  };
+
+  // Close flanks first so the door is not a shot across an empty pad. Spawns sit at z≈26–32, x≈±16/22/28.
+  neighbor(-24, 19.2, 7.2, 5.2, 16, 'en');
+  neighbor(24, 19.4, 7.2, 5.2, 19, 'wn');
+  neighbor(-30, 38, 8.2, 6.2, 21, 'es');
+  neighbor(30, 39, 8.0, 6.0, 25, 'ws');
+  neighbor(-34, 1, 7.0, 13.0, 18, 'e');
+  neighbor(35, -1, 7.5, 12.0, 23, 'w');
+  neighbor(-32, -21, 8.0, 7.0, 12, 'n');
+  neighbor(33, -22, 7.5, 8.0, 15, 'n');
+  neighbor(-21, 45, 10.0, 5.0, 20, 's');
+  neighbor(21, 45, 9.0, 5.0, 27, 's');
+  // Far block: the old lid sat on this curb, so the map read as a courtyard.
+  neighbor(-55, 60, 12.0, 8.0, 28, 's');
+  neighbor(55, 60, 12.0, 8.0, 32, 's');
+  neighbor(0, 74.2, 20.0, 6.0, 22, 's');
+  neighbor(-58, 8, 8.0, 11.0, 18, 'e');
+  neighbor(58, 8, 8.0, 11.0, 20, 'w');
+  neighbor(-52, -34, 10.0, 8.0, 14, 'n');
+  neighbor(52, -34, 10.0, 8.0, 16, 'n');
+  neighbor(0, -44, 16.0, 6.0, 12, 'n');
+
+  // Crosswalk gap at x∈[-6,6]; the rest is a low curb, not a wall.
+  box(-27, 0, 48.15, 42, 0.42, 0.7, { ...dark, noNav: true });
+  box(27, 0, 48.15, 42, 0.42, 0.7, { ...dark, noNav: true });
+
+  // Planters / kiosks clip the spawn→door sightline; x∈[-2.2,2.2], z 16→28 stays a 4 m walk.
+  planter(-8.5, 20.4, 2.6, 1.15); planter(8.5, 20.4, 2.6, 1.15);
+  planter(-14, 20.4); planter(14, 20.4);
+  planter(-4.0, 22.6, 1.7, 1.15); planter(4.0, 22.6, 1.7, 1.15);
+  planter(-5.4, 26.2, 1.8, 1.2); planter(5.4, 26.2, 1.8, 1.2);
+  planter(-10.5, 29.5, 2.0, 1.3); planter(11.2, 30.2, 2.0, 1.3);
+  planter(-6.2, 18.55, 1.6, 1.0); planter(6.2, 18.55, 1.6, 1.0);
+  planter(-18, 36, 2.2, 1.4); planter(18, 36.4, 2.2, 1.4);
+  planter(-10, 41, 1.8, 1.3); planter(10, 41, 1.8, 1.3);
+  planter(-26, 24, 1.6, 1.6); planter(26, 24.5, 1.6, 1.6);
+
+  kiosk(6.5, 21.3); kiosk(-7.4, 24.6, 1.85, 1.5); kiosk(8.6, 34.2, 1.9, 1.55);
+  kiosk(-12.5, 37.5, 1.6, 1.35);
+  newsbox(7.6, 20.15); newsbox(8.15, 20.15); newsbox(-8.5, 23.4); newsbox(9.8, 33.1);
+  bikeRack(-13.2, 22.1, 6); bikeRack(13.4, 23.0, 5);
+  box(-9.2, 0, 22.4, 1.35, 0.46, 0.48, { ...dark, noNav: true });
+  box(10.4, 0, 27.6, 1.35, 0.46, 0.48, { ...dark, noNav: true });
+  box(-15.5, 0, 33.2, 0.42, 0.78, 0.42, { ...dark, noNav: true });
+  box(15.8, 0, 34.0, 0.42, 0.78, 0.42, { ...dark, noNav: true });
+
+  for (const z of [18.2, 20.4, 22.6, 24.8, 26.8]) { bollard(-2.45, z); bollard(2.45, z); }
+  for (const x of [-10, -6, 6, 10]) bollard(x, 17.15);
+  lamp(-16, 18.6); lamp(16, 18.6); lamp(-26, 29.5); lamp(26, 29.8);
+  lamp(-10, 44.2); lamp(10, 44.2); lamp(-32, 16.4); lamp(32, 15.8);
+  lamp(0, 46.4); lamp(-20, 22.2); lamp(20, 22.5);
+
+  // Bus shelter sits off the door lane so smashable glass is cover, not a gate.
+  shelter(-11.2, 35.6);
+  shelter(14.8, 54.4);
+  shelter(-42.5, 22.2);
+
+  bollard(-6.3, 48.15); bollard(6.3, 48.15);
+  lamp(-8, 51.5); lamp(8, 51.5); lamp(0, 70.4);
+  lamp(-46, 18); lamp(-46, 42); lamp(46, 18); lamp(46, 42);
+  lamp(-14, -28); lamp(14, -28); lamp(0, -38);
+  planter(-8.5, 54.2, 2.0, 1.2); planter(8.5, 54.2, 2.0, 1.2);
+  planter(-42, 32.5, 1.8, 1.3); planter(42, 32.5, 1.8, 1.3);
+  planter(-10, -26.5, 1.7, 1.2); planter(10, -26.5, 1.7, 1.2);
+  bikeRack(-40.2, 18.4, 6); bikeRack(40.5, 18.8, 5); bikeRack(16.2, 58.5, 5);
+
+  // Plaza sculpture sits past the door lane (lane ends at z≈28). Ring is the grapple hook.
+  cyl(0, 0, 42.4, 0.42, 0.38, { ...stone, noNav: true });
+  cyl(0, 0.38, 42.4, 0.16, 3.15, { ...dark, noNav: true });
+  sphere(0, 3.78, 42.4, 0.52, { ink: INK.ORANGE, surface: 'metal' });
+  ring(0, 4.62, 42.4, 'y');
+  ring(-16, 6.15, 18.6, 'y');
+  ring(16, 6.15, 18.6, 'y');
+  ring(0, 5.4, 70.4, 'y');
+
+  // Smashables stay off x∈[-2.2,2.2] z 16→28 (door walk) and the team pads at x≈±16/22/28, z 26/32.
+  pot(-9.4, 38.2); pot(9.6, 38.6); pot(-17.5, 41.2, true); pot(17.8, 41.5, true);
+  pot(-40, 28.4); pot(-40, 36.2); pot(40, 28.6); pot(40, 36.4);
+  pot(-6.4, 56.2); pot(6.4, 56.2); pot(-4.4, 51.4, true);
+  pot(-8.2, -30.4); pot(8.2, -30.4); pot(-4.2, -36.2, true);
+  crate(-18.4, 34.2); crate(-17.2, 34.2); crate(19.2, 35.0);
+  crate(-44.5, 26.4); crate(-44.5, 27.7); crate(-43.2, 26.4);
+  crate(44.6, 26.8); crate(45.8, 26.8);
+  crate(-8.6, -24.2); crate(-7.4, -24.2); crate(8.8, -24.6); crate(8.8, -25.8);
+  crate(-4.8, 58.6); crate(5.0, 58.8);
+  barrel(-19.6, 36.8); barrel(20.4, 37.2); barrel(-46, 38.5); barrel(46, 38.8);
+  barrel(-12.2, -32.4); barrel(12.4, -32.6); barrel(-6.4, -24.8);
+  vend(-15.6, 19.2); vend(15.8, 19.4); vend(-8.8, 50.6); vend(9.0, 50.8);
+  vend(-41.2, 30.2); vend(41.4, 30.4);
+  booth(-19.5, 28.4); booth(19.8, 28.8); booth(-8.6, 62.2); booth(8.8, 62.4);
+  newsbox(-6.6, 50.4); newsbox(-6.1, 50.4); newsbox(6.8, 50.6);
+  kiosk(-16.4, 52.8, 1.8, 1.45); kiosk(16.8, 53.2, 1.8, 1.45);
+  kiosk(-48.5, 44.2, 1.7, 1.4); kiosk(48.8, 44.4, 1.7, 1.4);
+
+  // Loading van behind the south face: cab is cover, windscreen smashes.
+  {
+    const vx = -9.2, vz = -28.4;
+    box(vx, 0, vz + 1.55, 2.4, 2.05, 3.4, { ...dark, noNav: true });
+    box(vx, 0, vz - 1.55, 2.2, 1.45, 2.1, { ...dark, noNav: true });
+    glassPane(vx, 0.55, vz - 2.62, 1.85, 0.82, 0.06);
+    cyl(vx - 0.85, 0, vz + 2.5, 0.32, 0.32, { ...dark, noNav: true });
+    cyl(vx + 0.85, 0, vz + 2.5, 0.32, 0.32, { ...dark, noNav: true });
+    cyl(vx - 0.85, 0, vz - 2.2, 0.32, 0.32, { ...dark, noNav: true });
+    cyl(vx + 0.85, 0, vz - 2.2, 0.32, 0.32, { ...dark, noNav: true });
+  }
+
+  const escalator = (x, z0, up) => {
+    const steps = 14, rise = 0.3, run = 0.7, width = 1.65;
+    stairs(x, 0, z0, '+z', steps, width, { rise, run, surface: 'metal', ink: INK.BLACK });
+    // Balustrade follows the treads. A flat rail() would stay at ankle height by F2.
+    for (const s of [-1, 1]) {
+      for (let i = 0; i < steps; i++) {
+        const zy = i * rise, zz = z0 + (i + 0.5) * run;
+        box(x + s * (width / 2 + 0.05), zy, zz, 0.08, 1.08, run + 0.02, { surface: 'glass', ink: INK.TEAL, noNav: true });
+        box(x + s * (width / 2 + 0.08), zy + 1.0, zz, 0.1, 0.08, run + 0.02, { ...dark, noCollide: true });
+      }
+    }
+    const z1 = z0 + steps * run;
+    L.conveyors.push({ min: { x: x - width / 2, y: -0.05, z: z0 - 0.2 }, max: { x: x + width / 2, y: 4.6, z: z1 + 0.2 }, vx: 0, vz: up ? 1.4 : -1.4 });
+    const strip = new THREE.Mesh(new THREE.BoxGeometry(width - 0.2, 0.03, 0.55), makeInkMaterial({ ink: INK.ORANGE, surface: 'metal' }));
+    scene.add(strip); L.meshes.push(strip);
+    L.animated.push({ mesh: strip, update: (t) => { const u = ((t * 0.55) % 1 + 1) % 1; const along = up ? u : 1 - u; strip.position.set(x, 0.08 + along * 4.12, z0 + along * (z1 - z0)); } });
+  };
+  escalator(-13.1, 0.4, true);
+  escalator(-10.6, 0.4, false);
+  box(-11.85, 0, -0.05, 0.12, 1.05, 10.6, dark);
+  box(-11.85, 0, 0.1, 4.6, 0.14, 0.18, dark);
+  box(-11.85, 4.2, 10.4, 4.6, 0.14, 0.18, dark);
+
+  const cloth = { surface: 'cloth', ink: INK.BLACK };
+    const screen = { surface: 'screen', ink: INK.TEAL, ...detail };
+
+    // Square marble shafts. noNav so the ring around the atrium stays the walking route.
+    function column(x, y, z, h) {
+      box(x, y, z, 0.55, h, 0.55, { ...pale, noNav: true });
+      box(x, y + h - 0.1, z, 0.68, 0.1, 0.68, { ...pale, ...detail });
+    }
+
+    // Faces +Z: visitors come from the north door and split around the wings.
+    function reception(x, y, z) {
+      box(x, y, z, 2.4, 1.02, 0.78, { ...pale, noNav: true });
+      box(x - 1.55, y, z + 0.28, 0.9, 1.02, 0.7, { ...pale, noNav: true });
+      box(x + 1.55, y, z + 0.28, 0.9, 1.02, 0.7, { ...pale, noNav: true });
+      box(x - 2.15, y, z + 0.55, 0.55, 1.02, 0.55, { ...pale, noNav: true });
+      box(x + 2.15, y, z + 0.55, 0.55, 1.02, 0.55, { ...pale, noNav: true });
+      box(x, y + 1.02, z, 2.5, 0.04, 0.82, { ...wood, ...detail });
+      box(x - 0.5, y + 1.06, z + 0.12, 0.46, 0.34, 0.05, screen);
+      box(x + 0.15, y + 1.06, z + 0.12, 0.46, 0.34, 0.05, screen);
+      box(x, y + 1.02, z + 0.28, 0.5, 0.4, 0.08, { ...wood, noNav: true });
+      box(x, y + 1.18, z + 0.32, 0.28, 0.18, 0.04, { surface: 'metal', ink: INK.ORANGE, ...detail });
+    }
+
+    function sofa(x, y, z, yaw) {
+      const c = Math.cos(yaw), s = Math.sin(yaw);
+      const seat = new THREE.BoxGeometry(1.55, 0.38, 0.68); seat.rotateY(yaw); seat.translate(x, y + 0.28, z); addGeo(seat, INK.BROWN, 'cloth');
+      const back = new THREE.BoxGeometry(1.55, 0.42, 0.12); back.rotateY(yaw); back.translate(x - s * 0.3, y + 0.58, z + c * 0.3); addGeo(back, INK.BROWN, 'cloth');
+      const ax = Math.abs(c) > 0.7;
+      collider(x, y, z, ax ? 1.6 : 0.75, 0.52, ax ? 0.75 : 1.6, { noNav: true });
+    }
+
+    // facing 0/+x, π/-x, ±π/2. Long axis is perpendicular to facing so a row can share one counter front.
+    function shopCounter(x, y, z, w, facing) {
+      const alongX = Math.round(facing / (Math.PI / 2)) % 2 === 0;
+      const cw = alongX ? 0.72 : w, cd = alongX ? w : 0.72;
+      box(x, y, z, cw, 0.92, cd, { ...pale, noNav: true });
+      box(x, y + 0.92, z, cw + 0.04, 0.04, cd + 0.04, { surface: 'glass', ink: INK.TEAL, ...detail });
+      box(x, y + 0.96, z, 0.36, 0.26, 0.36, screen);
+    }
+
+    // One cubicle. (x,z) is the desk centre. Cardinal dir only so the single AABB is exact.
+    function workstation(x, y, z, dir) {
+      const k = Math.round(dir / (Math.PI / 2));
+      const fx = k === 0 ? 1 : (k === 2 || k === -2) ? -1 : 0;
+      const fz = k === 1 || k === -3 ? 1 : (k === -1 || k === 3) ? -1 : 0;
+      const lx = -fz, lz = fx;
+      box(x, y, z, fx ? 0.7 : 1.35, 0.74, fz ? 0.7 : 1.35, { ...wood, noCollide: true });
+      box(x + fx * 0.28, y + 0.74, z + fz * 0.28, fx ? 0.04 : 0.44, 0.32, fz ? 0.04 : 0.44, screen);
+      box(x - lx * 0.48, y, z - lz * 0.48, 0.18, 0.4, 0.3, { ...dark, ...detail });
+      box(x - fx * 0.4, y, z - fz * 0.4, fx ? 0.06 : 1.35, 1.15, fz ? 0.06 : 1.35, { ...cloth, noCollide: true });
+      box(x + lx * 0.68, y, z + lz * 0.68, lx ? 0.06 : 0.82, 1.15, lz ? 0.06 : 0.82, { ...pale, noCollide: true });
+      cyl(x - fx * 0.55, y, z - fz * 0.55, 0.17, 0.42, { ...dark, noCollide: true, seg: 8 });
+      box(x - fx * 0.55, y + 0.42, z - fz * 0.55, 0.34, 0.07, 0.34, { ...dark, ...detail });
+      box(x - fx * 0.66, y + 0.46, z - fz * 0.66, fx ? 0.07 : 0.34, 0.36, fz ? 0.07 : 0.34, { ...dark, ...detail });
+      collider(x - fx * 0.08, y, z - fz * 0.08, fx ? 0.95 : 1.48, 1.15, fz ? 0.95 : 1.48, { noNav: true });
+    }
+
+    // 1.7 × 1.55 pitch. An extra 1.7 m aisle after every pair of rows so a person can cross the bay.
+    function workBay(cx, y, cz, cols, rows, dir) {
+      const k = Math.round(dir / (Math.PI / 2));
+      const fx = k === 0 ? 1 : (k === 2 || k === -2) ? -1 : 0;
+      const fz = k === 1 || k === -3 ? 1 : (k === -1 || k === 3) ? -1 : 0;
+      const lx = -fz, lz = fx;
+      const rowOff = []; let D = 0;
+      for (let r = 0; r < rows; r++) { rowOff.push(D + 0.775); D += 1.55; if (r % 2 === 1 && r < rows - 1) D += 1.7; }
+      const W = cols * 1.7;
+      for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+        const lat = -W / 2 + 0.85 + c * 1.7, dep = -D / 2 + rowOff[r];
+        workstation(cx + lx * lat + fx * dep, y, cz + lz * lat + fz * dep, dir);
+      }
+    }
+
+    // Thin pale frames, glass on 2–3 sides, door ≥1.2 m. Interior table is the only solid mass.
+    function meetRoom(x1, z1, x2, z2, y) {
+      const t = 0.08, h = 2.55, x = (x1 + x2) / 2, z = (z1 + z2) / 2, w = x2 - x1, d = z2 - z1;
+      wallZ(z1, z2, x1, y, h, t, [[z - 0.7, z + 0.7, 0, 2.2]], { ...pale, noNav: true });
+      wallZ(z1, z2, x2, y, h, t, [[z1 + 0.1, z2 - 0.1, 0.12, 2.32]], { ...pale, noNav: true });
+      wallX(x1, x2, z1, y, h, t, [[x1 + 0.1, x2 - 0.1, 0.12, 2.32]], { ...pale, noNav: true });
+      wallX(x1, x2, z2, y, h, t, [[x1 + 0.1, x2 - 0.1, 0.12, 2.32]], { ...pale, noNav: true });
+      glassPane(x, y + 0.12, z1, w - 0.28, 2.2, 0.06);
+      glassPane(x, y + 0.12, z2, w - 0.28, 2.2, 0.06);
+      glassPane(x2, y + 0.12, z, 0.06, 2.2, d - 0.28);
+      box(x, y, z, Math.min(2.2, w - 1.3), 0.74, Math.min(1.05, d - 1.2), { ...wood, noNav: true });
+      for (const s of [-0.7, 0.7]) {
+        cyl(x + s, y, z - 0.7, 0.15, 0.4, { ...dark, noCollide: true, seg: 8 });
+        cyl(x + s, y, z + 0.7, 0.15, 0.4, { ...dark, noCollide: true, seg: 8 });
+      }
+    }
+
+    function pantry(x, y, z) {
+      box(x, y, z - 0.28, 2.15, 2.05, 0.38, { ...pale, noCollide: true });
+      box(x, y, z + 0.22, 2.15, 0.88, 0.58, { ...wood, noCollide: true });
+      box(x - 0.7, y + 0.88, z + 0.18, 0.32, 0.2, 0.32, { ...dark, ...detail });
+      box(x + 0.55, y + 0.88, z + 0.2, 0.38, 0.26, 0.28, { surface: 'metal', ink: INK.TEAL, ...detail });
+      collider(x, y, z, 2.2, 2.05, 1.05, { noNav: true });
+    }
+
+    function printNook(x, y, z) {
+      box(x, y, z, 0.82, 1.12, 0.68, { ...dark, noCollide: true });
+      box(x, y + 1.12, z, 0.7, 0.06, 0.52, { ...pale, ...detail });
+      box(x, y + 0.62, z + 0.28, 0.48, 0.28, 0.06, screen);
+      collider(x, y, z, 0.88, 1.18, 0.72, { noNav: true });
+    }
+
+    // ---- F1 marble lobby -------------------------------------------------
+    // Skip the two west shafts that would sit in the escalator run.
+    for (const x of [-12, -6, 6, 12]) for (const z of [2, 8, 12]) {
+      if (x <= -12 && z < 10.5) continue;
+      column(x, 0, z, 3.9);
+    }
+    reception(0, 0, 9.5);
+    sofa(-8.8, 0, 11.55, 0); sofa(-8.8, 0, 12.85, Math.PI);
+    sofa(8.8, 0, 11.55, 0); sofa(8.8, 0, 12.85, Math.PI);
+    // Held against the west wall so the 2 m walk beside the up escalator stays open.
+    for (const z of [6.1, 8.3, 11.3, 13.6]) shopCounter(-16.35, 0, z, 1.7, 0);
+    for (const z of [6.1, 8.3, 11.3, 13.6]) shopCounter(16.35, 0, z, 1.7, Math.PI);
+    box(4.55, 0, 14.05, 0.52, 2.35, 0.32, { ...dark, noNav: true });
+    box(4.55, 0.85, 14.18, 0.44, 1.15, 0.04, screen);
+
+    // ---- F2 turnstiles + lift lobby --------------------------------------
+    // Two short banks; the 1.8 m gap is the walk-through. Beams sit only over the pods, not the lane.
+    for (const x of [1.4, 2.05, 3.95, 4.6]) box(x, 4.2, 7.5, 0.12, 1.15, 0.85, { ...dark, noNav: true });
+    box(1.72, 4.2, 7.5, 0.5, 1.0, 0.06, { surface: 'glass', ink: INK.TEAL, ...detail });
+    box(4.28, 4.2, 7.5, 0.5, 1.0, 0.06, { surface: 'glass', ink: INK.TEAL, ...detail });
+    box(1.72, 5.4, 7.5, 1.1, 0.08, 0.55, dark);
+    box(4.28, 5.4, 7.5, 1.1, 0.08, 0.55, dark);
+    sofa(-2.35, 4.2, -8, Math.PI / 2);
+    sofa(2.35, 4.2, -8, -Math.PI / 2);
+    box(0, 4.2, -8, 0.65, 0.36, 0.65, { ...wood, noNav: true });
+    shopCounter(15.35, 4.2, 10.6, 3.2, Math.PI);
+
+    // ---- F3–F6 offices ---------------------------------------------------
+    // seed = floor index so each storey jogs differently, but the atrium ring stays empty.
+    for (let i = 2; i < 6; i++) {
+      const y = FLOORS[i], even = i % 2 === 0, o = even ? 0 : 0.3;
+      for (const [cx, cz] of [[-7 - o, 12], [7 + o, 12], [-7 - o, -8], [7 + o, -8]]) column(cx, y, cz, 3.85);
+      if (even) workBay(0, y, 12.2, 4, 2, -Math.PI / 2);
+      else workBay(i === 3 ? 1.1 : -1.3, y, 12.05, 3, 2, Math.PI / 2);
+      workBay(even ? -12.55 : -12.85, y, even ? 3.35 : 3.7, even ? 3 : 2, 2, even && i === 4 ? Math.PI : 0);
+      meetRoom(even ? 8.7 : 9.0, even ? 3.05 : 3.2, even ? 15.35 : 15.55, even ? 6.45 : 6.55, y);
+      if (even) { pantry(-14.15, y, -10.75); printNook(14.2, y, -10.8); }
+      else { printNook(-14.2, y, -10.8); pantry(14.15, y, -10.75); }
+      // Short screens with door gaps — they break the long marble sightline without boxing anyone in.
+      const nw = even;
+      wallX(nw ? -16.5 : 8.3, nw ? -8.9 : 16.5, 10.35, y, 2.35, 0.08,
+        [[(nw ? -12.8 : 12.4) - 0.85, (nw ? -12.8 : 12.4) + 0.85, 0, 2.15]], { ...pale, noNav: true });
+      wallZ(0.35, 6.15, -8.55, y, 2.35, 0.08, [[2.5 + o, 4.2 + o, 0, 2.15]], { ...pale, noNav: true });
+      wallX(nw ? 8.4 : -16.5, nw ? 16.5 : -8.7, -8.15, y, 2.2, 0.08,
+        [[(nw ? 12.5 : -12.5) - 0.9, (nw ? 12.5 : -12.5) + 0.9, 0, 2.1]], { ...pale, noNav: true });
+    }
+
+  // F2 north-east bay: the landing is otherwise a bare ring after the escalator.
+  workBay(11.2, 4.2, 12.4, 3, 2, -Math.PI / 2);
+  // Keep the F2 landing clear; this room sits on the east ring, not over the escalator well.
+  meetRoom(8.8, -6.4, 15.3, -3.1, 4.2);
+  for (const [x, z] of [[-7, 12], [7, 12]]) column(x, 4.2, z, 3.85);
+  sofa(-14.2, 0, 4.4, Math.PI / 2);
+  sofa(14.2, 0, 4.4, -Math.PI / 2);
+  box(-4.8, 0, 12.4, 1.15, 0.42, 0.55, { ...wood, noNav: true });
+  box(5.1, 0, 7.2, 0.85, 1.05, 0.85, { ...pale, noNav: true });
+
+  // Atrium rim: a kickplate you can step over once the glass is gone, so a drop is a choice.
+  const rim = (x1, z1, x2, z2, y) => {
+    const ax = Math.abs(x2 - x1) > Math.abs(z2 - z1);
+    box((x1 + x2) / 2, y, (z1 + z2) / 2, ax ? Math.abs(x2 - x1) : 0.16, 0.12, ax ? 0.16 : Math.abs(z2 - z1), { ...stone, noNav: true });
+    const len = ax ? Math.abs(x2 - x1) : Math.abs(z2 - z1);
+    const n = Math.max(1, Math.round(len / 2.4));
+    for (let i = 0; i < n; i++) {
+      const t0 = i / n, t1 = (i + 1) / n;
+      const cx = x1 + (x2 - x1) * (t0 + t1) / 2, cz = z1 + (z2 - z1) * (t0 + t1) / 2;
+      const w = ax ? len / n - 0.04 : 0.06, d = ax ? 0.06 : len / n - 0.04;
+      glassPane(cx, y + 0.12, cz, w, 1.05, d);
+    }
+  };
+  for (let i = 1; i < 6; i++) {
+    const y = FLOORS[i];
+    rim(AX1, AZ1, AX2, AZ1, y); rim(AX1, AZ2, AX2, AZ2, y);
+    rim(AX1, AZ1, AX1, AZ2, y); rim(AX2, AZ1, AX2, AZ2, y);
+  }
+
+  // Enclosed U-stair: two parallel flights and a mid landing. The old single-lane
+  // switchback put the door in a 1.1 m alley and laid the next floor over the climb.
+  {
+    const x0 = 18.05, x1 = 22.55, z0 = -5.6, z1 = 3.4;
+    const zDoor0 = -5.0, zDoor1 = -3.2, zFlight = -2.55, zMid = 0.95;
+    const xW = 19.2, xE = 21.25, wRun = 1.65, rise = 0.3, run = 0.5, n = 7, midH = n * rise;
+    const doorGaps = FLOORS.map((y) => [zDoor0, zDoor1, y, y + 2.2]);
+    wallZ(z0, z1, x0, 0, TOP, 0.28, doorGaps, pale);
+    wallZ(z0, z1, x1, 0, TOP, 0.28, [], pale);
+    wallX(x0, x1, z0, 0, TOP, 0.28, [], pale);
+    wallX(x0, x1, z1, 0, TOP, 0.28, [], pale);
+    for (let i = 0; i < 6; i++) {
+      const y = FLOORS[i];
+      slab(x0, z0, x1, zFlight, y, 0.28, stone);
+      if (i < 5) {
+        slab(x0, zMid - 0.05, x1, z1, y + midH, 0.28, stone);
+        stairs(xW, y, zFlight, '+z', n, wRun, { rise, run, surface: 'stone', ink: INK.BLACK });
+        stairs(xE, y + midH, zMid, '-z', n, wRun, { rise, run, surface: 'stone', ink: INK.BLACK });
+        // Starts a tread in so the landing stays open; stops before the mid-landing turn.
+        box((xW + xE) / 2, y, (zFlight + 1.15 + zMid) / 2, 0.1, midH + 1.05, zMid - zFlight - 1.15, { ...pale, noNav: true });
+      }
+    }
+    slab(x0, z0, x1, z1, TOP, 0.28, { ...dark, noNav: true });
+  }
+
+  if (!L.doors) L.doors = [];
+
+  function placeBox(b, cx, cy, cz, w, h, d) {
+    b.min.x = cx - w / 2; b.max.x = cx + w / 2; b.min.y = cy; b.max.y = cy + h; b.min.z = cz - d / 2; b.max.z = cz + d / 2;
+  }
+
+  // ctx.remote is optional; ctx.targets() is what main.js actually has today.
+  function eachPos(ctx, fn) {
+    if (!ctx) return;
+    const seen = new Set();
+    const give = (obj) => {
+      const body = obj?.body || obj;
+      const p = body?.pos || obj?.pos;
+      if (!p || seen.has(p)) return;
+      seen.add(p); fn(p, body);
+    };
+    if (ctx.player) give(ctx.player);
+    const rem = ctx.remote;
+    if (rem) {
+      for (const r of (typeof rem.values === 'function' ? rem.values() : rem)) give(r);
+    } else if (typeof ctx.targets === 'function') {
+      for (const t of ctx.targets()) give(t);
+    }
+  }
+
+  const dummy = (x = 0, y = 0, z = 0) => ({ position: new THREE.Vector3(x, y, z), material: null, add() { return this; }, children: [] });
+  function makeSlideDoor(opts) {
+    const { x, y, z, along = 'x', width = 3.4, height = 3.05, thick = 0.08, openDir = 1 } = opts;
+    const ax = along === 'x', leafW = width / 2, jam = 0.16;
+    let left, right;
+    if (scene) {
+      const glassM = makeInkMaterial({ ink: INK.TEAL, surface: 'glass' }), edgeM = makeInkMaterial({ ink: INK.BLACK, surface: 'metal' });
+      const leaf = () => {
+        const g = new THREE.Group();
+        g.add(new THREE.Mesh(ax ? new THREE.BoxGeometry(leafW - 0.04, height, thick) : new THREE.BoxGeometry(thick, height, leafW - 0.04), glassM));
+        const e = 0.045, fw = ax ? leafW : thick + 0.01, fd = ax ? thick + 0.01 : leafW;
+        for (const yy of [height / 2 - e / 2, -height / 2 + e / 2]) {
+          const s = new THREE.Mesh(new THREE.BoxGeometry(fw, e, fd), edgeM); s.position.y = yy; g.add(s);
+        }
+        return g;
+      };
+      left = leaf(); right = leaf();
+      left.position.set(ax ? x - leafW / 2 : x, y + height / 2, ax ? z : z - leafW / 2);
+      right.position.set(ax ? x + leafW / 2 : x, y + height / 2, ax ? z : z + leafW / 2);
+      scene.add(left, right); L.meshes.push(left, right);
+      L.animated.push({ mesh: left, update() {} }, { mesh: right, update() {} });
+    } else {
+      left = dummy(ax ? x - leafW / 2 : x, y + height / 2, ax ? z : z - leafW / 2);
+      right = dummy(ax ? x + leafW / 2 : x, y + height / 2, ax ? z : z + leafW / 2);
+    }
+    const cL = collider(left.position.x, y, left.position.z, ax ? leafW : thick, height, ax ? thick : leafW, { noNav: true });
+    const cR = collider(right.position.x, y, right.position.z, ax ? leafW : thick, height, ax ? thick : leafW, { noNav: true });
+    // Jambs stay put so the opening width is the door, not the whole wall gap.
+    if (ax) {
+      box(x - width / 2 - jam / 2, y, z, jam, height + 0.12, 0.18, dark);
+      box(x + width / 2 + jam / 2, y, z, jam, height + 0.12, 0.18, dark);
+      box(x, y + height, z, width + jam * 2, 0.12, 0.2, dark);
+    } else {
+      box(x, y, z - width / 2 - jam / 2, 0.18, height + 0.12, jam, dark);
+      box(x, y, z + width / 2 + jam / 2, 0.18, height + 0.12, jam, dark);
+      box(x, y + height, z, 0.2, 0.12, width + jam * 2, dark);
+    }
+    const padA = 0.5, padN = 1.7;
+    const tmin = ax
+      ? { x: x - width / 2 - padA, y: y - 0.2, z: z - padN }
+      : { x: x - padN, y: y - 0.2, z: z - width / 2 - padA };
+    const tmax = ax
+      ? { x: x + width / 2 + padA, y: y + height + 0.25, z: z + padN }
+      : { x: x + padN, y: y + height + 0.25, z: z + width / 2 + padA };
+    const inTrig = (p) => p.x > tmin.x && p.x < tmax.x && p.y > tmin.y && p.y < tmax.y && p.z > tmin.z && p.z < tmax.z;
+    const door = {
+      open: 0, want: 0, empty: 0,
+      tick(dt, ctx) {
+        let hit = false;
+        eachPos(ctx, (p) => { if (inTrig(p)) hit = true; });
+        const was = this.want;
+        if (hit) { this.want = 1; this.empty = 0; if (!was) ctx.audio?.doorSlide?.({ x, y: y + height * 0.5, z }); }
+        else { this.empty += dt; if (this.empty > 0.6) this.want = 0; }
+        const spd = 1 / 0.45;
+        this.open = this.want ? Math.min(1, this.open + dt * spd) : Math.max(0, this.open - dt * spd);
+        // Hash is XZ-only: sliding the AABB still works from the birth cells (gap opens at center);
+        // y=-40 is the hash-safe drop once the throat is wider than the body.
+        const slide = this.open * (leafW + 0.1) * (openDir < 0 ? -1 : 1);
+        if (ax) { left.position.x = x - leafW / 2 - slide; right.position.x = x + leafW / 2 + slide; }
+        else { left.position.z = z - leafW / 2 - slide; right.position.z = z + leafW / 2 + slide; }
+        if (this.open > 0.55) {
+          placeBox(cL, x, -40, z, 0.1, 0.1, 0.1); placeBox(cR, x, -40, z, 0.1, 0.1, 0.1);
+        } else {
+          placeBox(cL, left.position.x, y, left.position.z, ax ? leafW : thick, height, ax ? thick : leafW);
+          placeBox(cR, right.position.x, y, right.position.z, ax ? leafW : thick, height, ax ? thick : leafW);
+        }
+      },
+    };
+    L.doors.push(door);
+  }
+
+  function makeLift(id, x, z) {
+    const W = 2.4, D = 2.6, CH = 2.62, floorsY = FLOORS, HW = 0.35, OPEN = 2.0, DH = 2.25;
+    // Floor collider is shifted north so max.z reaches past the landing edge (z=-12.0) by ≥0.25 m.
+    const FLOOR_Z = z + 0.20, FLOOR_D = D + 0.40, DOOR_Z = z + D / 2 - 0.04, LAND_Z = z + D / 2 + 0.22;
+    const lit = scene ? makeInkMaterial({ ink: INK.ORANGE, surface: 'metal' }) : null;
+    const dim = scene ? makeInkMaterial({ ink: INK.BLACK, surface: 'metal' }) : null;
+    const cabin = scene ? new THREE.Group() : dummy(x, floorsY[0], z);
+    let doorL, doorR;
+    if (scene) {
+      const add = (geo, ink, surface) => cabin.add(new THREE.Mesh(geo, makeInkMaterial({ ink, surface })));
+      add(new THREE.BoxGeometry(W, 0.12, D).translate(0, 0.06, 0), INK.BLACK, 'metal');
+      add(new THREE.BoxGeometry(W, 0.08, D).translate(0, CH - 0.04, 0), INK.BLACK, 'metal');
+      add(new THREE.BoxGeometry(W, CH, 0.08).translate(0, CH / 2, -D / 2 + 0.04), INK.BLACK, 'metal');
+      add(new THREE.BoxGeometry(0.08, CH, D).translate(-W / 2 + 0.04, CH / 2, 0), INK.BLACK, 'metal');
+      add(new THREE.BoxGeometry(0.08, CH, D).translate(W / 2 - 0.04, CH / 2, 0), INK.BLACK, 'metal');
+      // Lip rides with the car; a static per-floor slab would intersect the cabin as it passes.
+      add(new THREE.BoxGeometry(OPEN + 0.1, 0.12, 0.5).translate(0, 0.06, D / 2 + 0.08), INK.BLACK, 'metal');
+      doorL = new THREE.Mesh(new THREE.BoxGeometry(OPEN / 2 - 0.02, DH - 0.05, 0.06), dim);
+      doorR = doorL.clone();
+      doorL.position.set(-OPEN / 4, DH / 2, D / 2 - 0.04); doorR.position.set(OPEN / 4, DH / 2, D / 2 - 0.04);
+      cabin.add(doorL, doorR);
+      cabin.position.set(x, floorsY[0], z); scene.add(cabin); L.meshes.push(cabin); L.animated.push({ mesh: cabin, update() {} });
+    } else {
+      doorL = dummy(-OPEN / 4, DH / 2, D / 2 - 0.04); doorR = dummy(OPEN / 4, DH / 2, D / 2 - 0.04);
+    }
+    const floorBox = collider(x, floorsY[0], FLOOR_Z, W, 0.14, FLOOR_D, { noNav: true });
+    const ceilBox = collider(x, floorsY[0] + CH - 0.1, z, W, 0.1, D, { noNav: true });
+    const backBox = collider(x, floorsY[0], z - D / 2 + 0.05, W, CH, 0.1, { noNav: true });
+    const leftBox = collider(x - W / 2 + 0.05, floorsY[0], z, 0.1, CH, D, { noNav: true });
+    const rightBox = collider(x + W / 2 - 0.05, floorsY[0], z, 0.1, CH, D, { noNav: true });
+    const cDL = collider(x - OPEN / 4, floorsY[0], DOOR_Z, OPEN / 2, DH, 0.1, { noNav: true });
+    const cDR = collider(x + OPEN / 4, floorsY[0], DOOR_Z, OPEN / 2, DH, 0.1, { noNav: true });
+    const top = floorsY[floorsY.length - 1] + CH + 0.35;
+    wallZ(z - D / 2, z + D / 2, x - W / 2 - 0.16, 0, top, 0.28, [], { ...stone, noNav: true });
+    wallZ(z - D / 2, z + D / 2, x + W / 2 + 0.16, 0, top, 0.28, [], { ...stone, noNav: true });
+    wallX(x - W / 2 - 0.16, x + W / 2 + 0.16, z - D / 2 - 0.16, 0, top, 0.28, [], { ...stone, noNav: true });
+    wallX(x - W / 2 - 0.16, x + W / 2 + 0.16, z + D / 2 + 0.16, 0, top, 0.28, floorsY.map((y) => [x - 1.0, x + 1.0, y, y + DH]), { ...stone, noNav: true });
+    const landings = floorsY.map((y) => {
+      let lm, rm;
+      if (scene) {
+        lm = new THREE.Mesh(new THREE.BoxGeometry(OPEN / 2 - 0.02, DH, 0.08), dim); rm = lm.clone();
+        lm.position.set(x - OPEN / 4, y + DH / 2, LAND_Z); rm.position.set(x + OPEN / 4, y + DH / 2, LAND_Z);
+        scene.add(lm, rm); L.meshes.push(lm, rm); L.animated.push({ mesh: lm, update() {} }, { mesh: rm, update() {} });
+      } else {
+        lm = dummy(x - OPEN / 4, y + DH / 2, LAND_Z); rm = dummy(x + OPEN / 4, y + DH / 2, LAND_Z);
+      }
+      return {
+        y, lm, rm,
+        boxL: collider(x - OPEN / 4, y, LAND_Z, OPEN / 2, DH, 0.12, { noNav: true }),
+        boxR: collider(x + OPEN / 4, y, LAND_Z, OPEN / 2, DH, 0.12, { noNav: true }),
+      };
+    });
+    // 02 on the landing, as on the real car doors.
+    for (const y of floorsY) {
+      box(x, y + 2.38, LAND_Z + 0.06, 0.55, 0.18, 0.04, { ...pale, ...detail });
+      box(x - 0.12, y + 2.38, LAND_Z + 0.08, 0.08, 0.12, 0.02, { surface: 'metal', ink: INK.ORANGE, ...detail });
+      box(x + 0.12, y + 2.38, LAND_Z + 0.08, 0.08, 0.12, 0.02, { surface: 'metal', ink: INK.ORANGE, ...detail });
+    }
+    const buttons = [];
+    for (let i = 0; i < 6; i++) {
+      const col = i % 2, row = Math.floor(i / 2);
+      const lx = -W / 2 + 0.12, ly = 1.05 + (2 - row) * 0.32, lz = -0.28 + col * 0.42;
+      const pad = scene ? new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.2, 0.2), dim) : dummy(lx, ly, lz);
+      pad.position.set(lx, ly, lz); if (scene) cabin.add(pad);
+      const b = collider(x + lx, floorsY[0] + ly - 0.1, z + lz, 0.12, 0.2, 0.2, { noNav: true });
+      const btn = { kind: 'floor', lift: null, floor: i, pos: new THREE.Vector3(x + lx, floorsY[0] + ly, z + lz), box: b, pad };
+      b.data.button = btn; buttons.push(btn); L.buttons.push(btn);
+    }
+    const calls = [];
+    for (let i = 0; i < floorsY.length; i++) {
+      const y = floorsY[i], cx = x + W / 2 + 0.38, cz = LAND_Z + 0.18;
+      box(cx, y + 1.12, cz, 0.1, 0.32, 0.1, { surface: 'metal', ink: INK.ORANGE, ...detail });
+      const b = collider(cx, y + 1.02, cz, 0.2, 0.4, 0.2, { noNav: true });
+      const btn = { kind: 'call', lift: null, floor: i, pos: new THREE.Vector3(cx, y + 1.22, cz), box: b };
+      b.data.button = btn; L.buttons.push(btn); calls.push(btn);
+    }
+    const park = (b) => placeBox(b, x, -40, z, 0.1, 0.1, 0.1);
+    const lift = {
+      id, x, z, floors: floorsY, floor: 0, target: 0, y: floorsY[0], state: 'idle', t: 0, door: 1, emptyT: 0, cabin,
+      call(floor) {
+        if (floor < 0 || floor >= floorsY.length) return false;
+        if (this.floor === floor && this.target === floor && this.door > 0.9 && (this.state === 'idle' || this.state === 'open')) return false;
+        this.target = floor;
+        if (this.state === 'idle') this.state = this.floor === floor ? 'open' : 'close';
+        return true;
+      },
+      snap(floor) {
+        this.floor = this.target = Math.max(0, Math.min(floorsY.length - 1, floor | 0));
+        this.state = 'idle'; this.t = 0; this.door = 1; this.emptyT = 0; this.setY(floorsY[this.floor], null, true); this.applyDoors();
+      },
+      inside(p, ny = this.y) {
+        if (!p) return false;
+        if (p.y <= ny - HW - 0.2 || p.y >= ny + CH + 0.2) return false;
+        const inCabin = p.x > x - W / 2 - HW && p.x < x + W / 2 + HW && p.z > z - D / 2 - HW && p.z < z + D / 2 + HW;
+        const inThroat = p.x > x - 1.0 - HW && p.x < x + 1.0 + HW && p.z > z + D / 2 - HW && p.z < LAND_Z + 0.55 + HW;
+        return inCabin || inThroat;
+      },
+      nearDoor(p) {
+        const fy = floorsY[this.floor];
+        return Math.hypot(p.x - x, p.z - LAND_Z) < 3.2 && p.y > fy - 0.45 && p.y < fy + 2.5;
+      },
+      presence(ctx) {
+        let inside = false, near = false;
+        eachPos(ctx, (p) => { if (this.inside(p)) inside = true; if (this.nearDoor(p)) near = true; });
+        return { inside, near, hold: inside || near };
+      },
+      setY(ny, ctx, quiet) {
+        const dy = ny - this.y; this.y = ny; cabin.position.y = ny;
+        placeBox(floorBox, x, ny, FLOOR_Z, W, 0.14, FLOOR_D);
+        placeBox(ceilBox, x, ny + CH - 0.1, z, W, 0.1, D);
+        placeBox(backBox, x, ny, z - D / 2 + 0.05, W, CH, 0.1);
+        placeBox(leftBox, x - W / 2 + 0.05, ny, z, 0.1, CH, D);
+        placeBox(rightBox, x + W / 2 - 0.05, ny, z, 0.1, CH, D);
+        for (const btn of buttons) {
+          const p = btn.pad.position;
+          placeBox(btn.box, x + p.x, ny + p.y - 0.1, z + p.z, 0.12, 0.2, 0.2);
+          btn.pos.set(x + p.x, ny + p.y, z + p.z);
+        }
+        this.applyDoors();
+        if (quiet) return;
+        eachPos(ctx, (p, body) => {
+          if (this.inside(p, ny - dy) || this.inside(p, ny)) { p.y += dy; if (body?.vel) body.vel.y = 0; }
+        });
+      },
+      applyDoors() {
+        const open = this.door, slide = open * 1.08, leaf = OPEN / 2;
+        doorL.position.x = -leaf / 2 - slide; doorR.position.x = leaf / 2 + slide;
+        // Park every collider that belongs to an open doorway. Other floors stay solid so the
+        // hoistway is not a hole you can walk into from a landing the car is not on.
+        if (open > 0.55) { park(cDL); park(cDR); }
+        else {
+          placeBox(cDL, x - leaf / 2 - slide, this.y, DOOR_Z, leaf, DH, 0.1);
+          placeBox(cDR, x + leaf / 2 + slide, this.y, DOOR_Z, leaf, DH, 0.1);
+        }
+        for (let i = 0; i < landings.length; i++) {
+          const ld = landings[i], here = i === this.floor ? open : 0, hs = here * 1.08;
+          ld.lm.position.x = x - leaf / 2 - hs; ld.rm.position.x = x + leaf / 2 + hs;
+          if (here > 0.55) { park(ld.boxL); park(ld.boxR); }
+          else {
+            placeBox(ld.boxL, x - leaf / 2 - hs, ld.y, LAND_Z, leaf, DH, 0.12);
+            placeBox(ld.boxR, x + leaf / 2 + hs, ld.y, LAND_Z, leaf, DH, 0.12);
+          }
+        }
+      },
+      tick(dt, ctx) {
+        this.t += dt;
+        const hold = this.presence(ctx).hold;
+        if (this.state === 'close') {
+          this.door = Math.max(0, 1 - this.t / 0.7); this.applyDoors();
+          if (this.t >= 0.7) {
+            this.door = 0; this.t = 0;
+            this.state = this.target !== this.floor ? 'move' : 'idle';
+          }
+        } else if (this.state === 'move') {
+          const dest = floorsY[this.target], dir = Math.sign(dest - this.y) || 1, ny = this.y + dir * 4.2 * dt;
+          if ((dir > 0 && ny >= dest) || (dir < 0 && ny <= dest)) {
+            this.setY(dest, ctx); this.floor = this.target; this.state = 'open'; this.t = 0; this.emptyT = 0;
+            ctx.audio?.liftDing?.(cabin.position);
+          } else {
+            this.setY(ny, ctx);
+            if ((this._hum = (this._hum || 0) - dt) <= 0) { this._hum = 0.18; ctx.audio?.liftHum?.(cabin.position); }
+          }
+        } else if (this.state === 'open') {
+          this.door = Math.min(1, this.t / 0.7); this.applyDoors();
+          if (this.target !== this.floor) { this.state = 'close'; this.t = (1 - this.door) * 0.7; }
+          else if (this.t >= 0.7) { this.state = 'idle'; this.door = 1; this.emptyT = 0; }
+        } else {
+          // Stay open on this floor while anyone is in the car or at the landing; close only
+          // after they leave, or when a call sends the car elsewhere.
+          if (this.target !== this.floor) { this.state = 'close'; this.t = (1 - this.door) * 0.7; this.emptyT = 0; }
+          else if (hold && this.door < 0.99) { this.state = 'open'; this.t = this.door * 0.7; this.emptyT = 0; }
+          else if (!hold && this.door > 0.01) {
+            this.emptyT += dt;
+            if (this.emptyT > 0.8) { this.state = 'close'; this.t = (1 - this.door) * 0.7; this.emptyT = 0; }
+          } else { this.emptyT = 0; this.applyDoors(); }
+        }
+        for (const btn of buttons) btn.pad.material = btn.floor === this.target ? lit : dim;
+      },
+    };
+    for (const btn of buttons) btn.lift = lift;
+    for (const btn of calls) btn.lift = lift;
+    lift.applyDoors(); L.lifts.push(lift); return lift;
+  }
+
+  // Close the 7 m facade gap down to the 3.4 m door; otherwise the outer pair is walk-aroundable.
+  box(-2.6, 0, 16.02, 1.86, 3.15, 0.38, pale);
+  box(2.6, 0, 16.02, 1.86, 3.15, 0.38, pale);
+  // Cheeks make a lock of the two pairs. No breakable glass on this opening.
+  wallZ(13.68, 16.12, -1.78, 0, 3.15, 0.14, [], { ...dark, noNav: true });
+  wallZ(13.68, 16.12, 1.78, 0, 3.15, 0.14, [], { ...dark, noNav: true });
+
+  makeSlideDoor({ x: 0, y: 0, z: 16.05, along: 'x', width: 3.4, height: 3.05, thick: 0.08, openDir: 1 });
+  makeSlideDoor({ x: 0, y: 0, z: 13.7, along: 'x', width: 3.4, height: 3.05, thick: 0.08, openDir: 1 });
+  makeLift(0, -4.6, -13.35);
+  makeLift(1, 4.6, -13.35);
+
+  // Walk-in shops live on the new streets. Same door path as the lobby so a late join still ticks.
+  {
+    const hall = (cx, cz, w, d, h, face) => {
+      const x0 = cx - w / 2, x1 = cx + w / 2, z0 = cz - d / 2, z1 = cz + d / 2, dw = 3.4;
+      const gx = [[cx - dw / 2, cx + dw / 2, 0, 3.05]];
+      const gz = [[cz - dw / 2, cz + dw / 2, 0, 3.05]];
+      wallX(x0, x1, z0, 0, h, 0.28, face === 's' ? gx : [], pale);
+      wallX(x0, x1, z1, 0, h, 0.28, face === 'n' ? gx : [], pale);
+      wallZ(z0, z1, x0, 0, h, 0.28, face === 'w' ? gz : [], pale);
+      wallZ(z0, z1, x1, 0, h, 0.28, face === 'e' ? gz : [], pale);
+      slab(x0 + 0.15, z0 + 0.15, x1 - 0.15, z1 - 0.15, 0, 0.1, stone);
+      slab(x0, z0, x1, z1, h, 0.22, { ...dark, noNav: true });
+    };
+    hall(0, 64, 12, 8, 4.2, 's');
+    makeSlideDoor({ x: 0, y: 0, z: 60.14, along: 'x', width: 3.4, height: 3.05, thick: 0.08, openDir: 1 });
+    glassPane(-3.6, 0.12, 59.86, 2.6, 2.5, 0.07);
+    glassPane(3.6, 0.12, 59.86, 2.6, 2.5, 0.07);
+    box(-3.4, 0, 65.6, 3.4, 1.05, 0.55, { ...wood, noNav: true });
+    box(3.4, 0, 65.6, 3.4, 1.05, 0.55, { ...wood, noNav: true });
+    vend(-4.2, 62.2); vend(4.2, 62.2);
+    crate(-4.6, 63.8); pot(4.6, 63.8);
+    pickup(0, 0.2, 65.4);
+    ring(0, 3.6, 64, 'y');
+
+    hall(-54, 32, 14, 16, 4.6, 'e');
+    makeSlideDoor({ x: -47.14, y: 0, z: 32, along: 'z', width: 3.4, height: 3.05, thick: 0.08, openDir: 1 });
+    glassPane(-46.86, 0.12, 28.6, 0.07, 2.5, 2.8);
+    glassPane(-46.86, 0.12, 35.4, 0.07, 2.5, 2.8);
+    for (const z of [26.2, 28.6, 35.4, 37.8]) { crate(-50.2, z); crate(-51.5, z); }
+    vend(-50.6, 32); pot(-57.2, 32, true);
+    pickup(-56, 0.2, 32);
+
+    hall(54, 34, 12, 12, 4.2, 'w');
+    makeSlideDoor({ x: 48.14, y: 0, z: 34, along: 'z', width: 3.4, height: 3.05, thick: 0.08, openDir: 1 });
+    glassPane(46.86, 0.12, 30.2, 0.07, 2.5, 2.4);
+    glassPane(46.86, 0.12, 37.8, 0.07, 2.5, 2.4);
+    box(52.2, 0, 30.4, 1.4, 0.42, 1.4, { ...wood, noNav: true });
+    box(55.6, 0, 30.4, 1.4, 0.42, 1.4, { ...wood, noNav: true });
+    box(52.2, 0, 37.6, 1.4, 0.42, 1.4, { ...wood, noNav: true });
+    box(55.6, 0, 37.6, 1.4, 0.42, 1.4, { ...wood, noNav: true });
+    pot(57.2, 34); vend(51.4, 37.8);
+    pickup(56.4, 0.2, 34);
+  }
+
+  const mark = (x, y, z, id) => {
+    for (const dx of [-2.6, 2.6]) box(x + dx, y + 0.04, z, 0.1, 0.02, 5.2, { surface: 'cloth', ink: INK.ORANGE, ...detail });
+    for (const dz of [-2.6, 2.6]) box(x, y + 0.04, z + dz, 5.1, 0.02, 0.1, { surface: 'cloth', ink: INK.ORANGE, ...detail });
+    if (id === 'A') box(x, y + 0.05, z, 1.1, 0.02, 0.16, { surface: 'cloth', ink: INK.ORANGE, ...detail });
+    else { box(x - 0.5, y + 0.05, z, 0.14, 0.02, 1.6, { surface: 'cloth', ink: INK.ORANGE, ...detail }); box(x + 0.5, y + 0.05, z, 0.14, 0.02, 1.6, { surface: 'cloth', ink: INK.ORANGE, ...detail }); }
+  };
+  L.teamSpawns = [
+    [-28, -22, -16].flatMap((x) => [26, 32].map((z) => new THREE.Vector3(x, 0.08, z))),
+    [16, 22, 28].flatMap((x) => [26, 32].map((z) => new THREE.Vector3(x, 0.08, z))),
+  ];
+  L.teamFacing = [0, 0];
+  L.playerStart.set(0, 0.08, 28);
+  L.bombSites = [{ id: 'A', pos: new THREE.Vector3(0, 0.08, 3), radius: 3 }, { id: 'B', pos: new THREE.Vector3(0, 16.88, 11.5), radius: 3 }];
+  mark(0, 0, 3, 'A'); mark(0, 16.8, 11.5, 'B');
+
+  spawn(0, 0.08, 24); spawn(-14, 0.08, 8); spawn(12, 0.08, 10); spawn(-8, 0.08, -8); spawn(8, 0.08, -8);
+  spawn(-12, 4.28, 12); spawn(10, 4.28, 8); spawn(0, 4.28, -8);
+  spawn(-12, 8.48, 12); spawn(12, 8.48, 12); spawn(-12, 12.68, 12); spawn(12, 12.68, -8);
+  spawn(-12, 16.88, 12); spawn(12, 16.88, 12); spawn(-10, 21.08, 12); spawn(10, 21.08, -8);
+  spawn(0, 0.08, 58); spawn(-48, 0.08, 28); spawn(48, 0.08, 30); spawn(0, 0.08, -30);
+  sniper(-12, 21.08, 12); sniper(12, 21.08, 12); sniper(0, 21.08, -10);
+  pickup(-10, 0.2, 10); pickup(10, 0.2, -6); pickup(-10, 4.4, 12); pickup(10, 8.6, 12);
+  pickup(-10, 12.8, -8); pickup(10, 16.95, 12); pickup(0, 21.2, 12);
+  pickup(0, 0.2, 42.4); pickup(-14, 0.2, 54); pickup(14, 0.2, 54); pickup(0, 0.2, -36);
+  L.arenaSpawns = [...L.teamSpawns.flat(), ...L.spawns, ...L.snipers].map((p) => p.clone());
+
+  const lid = { noNav: true, noGrapple: true };
+  collider(0, 56, 16, 160, 6, 150, lid);
+  collider(-68, -2, 16, 1, 60, 140, lid); collider(68, -2, 16, 1, 60, 140, lid);
+  collider(0, -2, -48, 140, 60, 1, lid); collider(0, -2, 78, 140, 60, 1, lid);
+
+  L.update = (dt, ctx) => {
+    for (const door of L.doors) door.tick(dt, ctx);
+    for (const lift of L.lifts) lift.tick(dt, ctx);
+    const p = ctx?.player?.body;
+    if (p) for (const lift of L.lifts) {
+      if (!lift.inside(p.pos)) continue;
+      const fy = lift.y + 0.14;
+      if (p.pos.y < fy) p.pos.y = fy;
+      if (p.vel.y < 0) p.vel.y = 0;
+      p.onGround = true;
+    }
+  };
+  return B.finish();
+}
+
 export function buildLevel(scene, world, key = 'district', opts = {}) {
   const B = createBuilder(scene, world);
   const team = !!opts.team, arena = !!opts.arena || team;
-  const level = key === 'greatwall' ? buildGreatWall(B) : key === 'yuanmingyuan' ? buildYuanmingyuan(B) : key === 'summerpalace' ? buildSummerPalace(B) : key === 'lombard' ? buildLombard(B) : key === 'timesquare' ? buildTimesSquare(B) : key === 'zijingang' ? buildZijingang(B) : key === 'depot' ? buildDepot(B) : key === 'mexico' ? buildMexico(B, arena) : key === 'undercity' ? buildUndercity(B, arena, team) : buildDistrict(B, arena, team);
+  const level = key === 'dinghao' ? buildDinghao(B) : key === 'greatwall' ? buildGreatWall(B) : key === 'yuanmingyuan' ? buildYuanmingyuan(B) : key === 'summerpalace' ? buildSummerPalace(B) : key === 'lombard' ? buildLombard(B) : key === 'timesquare' ? buildTimesSquare(B) : key === 'zijingang' ? buildZijingang(B) : key === 'depot' ? buildDepot(B) : key === 'mexico' ? buildMexico(B, arena) : key === 'undercity' ? buildUndercity(B, arena, team) : buildDistrict(B, arena, team);
   return populateMatchSpawns(level, world);
 }

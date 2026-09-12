@@ -19,6 +19,7 @@ export const SETTINGS = {
   invert:     { def: false },
   grenadeAutoPin: { def: false },
   ballistics: { def: false },
+  fallDamage: { def: false },
   difficulty: { def: 'easy', choices: ['easy', 'medium', 'hard', 'extreme'] },
 };
 

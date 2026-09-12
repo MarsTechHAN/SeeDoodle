@@ -109,7 +109,7 @@ ctx.grenadeOwnerPos = (id) => {
   return r.center.clone().add(new THREE.Vector3(0, 0.35, 0));
 };
 input.onControlCancel = () => { player.cancelGrenade?.(); player.cancelKnife?.(); boardToggle = false; };
-const lobby = { players: new Map(), hostId: null, isPublic: true, status: '', code: '', map: null, gameMode: 'ffa', ballistics: false, diff: 'easy', mob: 'mid', weaponMode: 'normal', skin: 'classic' };
+const lobby = { players: new Map(), hostId: null, isPublic: true, status: '', code: '', map: null, gameMode: 'ffa', ballistics: false, fall: false, diff: 'easy', mob: 'mid', weaponMode: 'normal', skin: 'classic' };
 const colorSeats = new Map(); // recently departed ids -> { color, until }, shared with the next host
 const scores = new Map();      // peer id -> { name, kills, deaths }
 let screen = 'main';           // which start-screen panel is showing: main | online | lobby
@@ -122,6 +122,7 @@ function combatClaim(target, owner = net.id, life = match.actor(owner)?.life) { 
 // Whose call it is, following the map: alone it is your own setting, in a lobby it is the host's,
 // so everybody in a match is shooting the same physics.
 ctx.ballistics = () => (net.active ? !!lobby.ballistics : settings.ballistics);
+ctx.fallDamage = () => (net.active ? !!lobby.fall : settings.fallDamage);
 ctx.difficulty = () => (net.active ? lobby.diff : settings.difficulty) || 'easy';
 // The movement ladder is a deathmatch rule and nothing else: solo and squad play get `null`, which
 // is the full kit. In versus it is the host's pick, same as the map and the ballistics.
@@ -246,7 +247,7 @@ function breakProp(br, dir, local, quiet = false) {
     if (game.mode === 'solo') game.addScore(25, 'PIÑATA');
   } else if (br.kind === 'cactus') { effects.blood(pos, d, 1.4, { ink: INK.GREEN }); effects.bloodPool(new THREE.Vector3(pos.x, 0, pos.z), 1.1, INK.GREEN); }
   else { effects.strokeBurst(pos, br.ink, 12, 5, { life: 0.35, size: 0.04 }); effects.smoke(pos, up, 3); }
-  audio.smash(pos, br.kind === 'barrel' || br.kind === 'crate' || br.kind === 'cactus');
+  if (br.kind === 'glass') audio.glass(pos); else audio.smash(pos, br.kind === 'barrel' || br.kind === 'crate' || br.kind === 'cactus');
   if (local && net.active) net.broadcast('brk', { id: br.id });
 }
 // every ray a gun fires this tick is sent to the others, who draw it as a tracer from the shooter's gun
@@ -756,7 +757,7 @@ function applyLobbyPlayers(rows, reservations) {
   const mine = lobby.players.get(net.id);
   if (!net.isHost && mine && JSON.stringify(mine.appearance) !== JSON.stringify(myAppearance)) net.send('appearance', myAppearance);
 }
-function broadcastLobby() { net.send('lobby', { players: lobbyRows(), colors: reservedColors(), hostId: net.id, isPublic: lobby.isPublic, map: lobby.map || mapKey, mode: lobby.gameMode, bal: !!lobby.ballistics, diff: ctx.difficulty(), mob: lobby.mob, weaponMode: ctx.weaponMode(), skin: ctx.skin(), shown: net.aliasCode || net.code }); renderLobby(); }
+function broadcastLobby() { net.send('lobby', { players: lobbyRows(), colors: reservedColors(), hostId: net.id, isPublic: lobby.isPublic, map: lobby.map || mapKey, mode: lobby.gameMode, bal: !!lobby.ballistics, fall: !!lobby.fall, diff: ctx.difficulty(), mob: lobby.mob, weaponMode: ctx.weaponMode(), skin: ctx.skin(), shown: net.aliasCode || net.code }); renderLobby(); }
 const inMatch = () => ['play', 'dying', 'over'].includes(game.state);
 let boardT = 0;   // seconds since the open scoreboard was last redrawn
 net.onPeerLeave = (id) => { match.removeMember(id); const nm = (lobby.players.get(id) || {}).name; removeRemote(id); broadcastLobby(); if (inMatch()) { hud.kill(t`${nm || ts('someone')} left`, 0); sendScores(); } };
@@ -832,7 +833,7 @@ net.onPeerJoin = (from, meta) => {
   colorSeats.delete(from); lobby.players.set(from, { name, color, appearance, team, bot: false }); applyTeams(); if (teamMode() && inMatch()) match.addMember(from); broadcastLobby();
   if (game.state === 'play' || game.state === 'dying') {
     if (!scores.has(from)) scores.set(from, { name, kills: 0, deaths: 0 });
-    net.sendTo(from, 'start', { late: true, players: lobbyRows(), colors: reservedColors(), combat: teamMode() ? match.state : null, spawn: farthestSpawnIndex(), map: lobby.map || mapKey, mode: game.mode, bal: !!lobby.ballistics, diff: ctx.difficulty(), mob: lobby.mob, weaponMode: ctx.weaponMode(), skin: ctx.skin(), grenades: player.grenadeSnapshot(), broken: level.breakables.filter((b) => !b.alive).map((b) => b.id) });
+    net.sendTo(from, 'start', { late: true, players: lobbyRows(), colors: reservedColors(), combat: teamMode() ? match.state : null, spawn: farthestSpawnIndex(), map: lobby.map || mapKey, mode: game.mode, bal: !!lobby.ballistics, fall: !!lobby.fall, diff: ctx.difficulty(), mob: lobby.mob, weaponMode: ctx.weaponMode(), skin: ctx.skin(), grenades: player.grenadeSnapshot(), broken: level.breakables.filter((b) => !b.alive).map((b) => b.id), lifts: (level.lifts || []).map((l) => l.floor) });
     // a latecomer has an empty world until it is told what is already standing in it
     if (coopHost()) setTimeout(() => sendCoopCatchUp(from), 350);
     sendScores(); hud.kill(t`${name} joined`, 0);
@@ -840,13 +841,13 @@ net.onPeerJoin = (from, meta) => {
 };
 net.on('lobby', (d, from) => {
   if (net.isHost || from !== net.hostId || !Array.isArray(d.players)) return;
-  lobby.hostId = d.hostId; lobby.isPublic = !!d.isPublic; lobby.code = net.code; lobby.shown = d.shown || net.code; if (d.map) lobby.map = knownMap(d.map); lobby.gameMode = modeOf(d.mode); lobby.ballistics = !!d.bal; if (d.mob) lobby.mob = d.mob; if (d.diff) lobby.diff = d.diff; lobby.weaponMode = weaponModeOf(d.weaponMode).key; lobby.skin = skinOf(d.skin).key; applyRules();
+  lobby.hostId = d.hostId; lobby.isPublic = !!d.isPublic; lobby.code = net.code; lobby.shown = d.shown || net.code; if (d.map) lobby.map = knownMap(d.map); lobby.gameMode = modeOf(d.mode); lobby.ballistics = !!d.bal; if (d.fall !== undefined) lobby.fall = !!d.fall; if (d.mob) lobby.mob = d.mob; if (d.diff) lobby.diff = d.diff; lobby.weaponMode = weaponModeOf(d.weaponMode).key; lobby.skin = skinOf(d.skin).key; applyRules();
   applyLobbyPlayers(d.players, d.colors);
   if (inMatch()) { for (const p of d.players) if (!scores.has(p.id)) scores.set(p.id, { name: p.name, kills: 0, deaths: 0 }); refreshScoreHud(); }
   renderLobby();
 });
 net.on('leave', (d) => { const nm = (lobby.players.get(d.id) || {}).name; removeRemote(d.id); if (inMatch()) hud.kill(t`${nm || ts('someone')} left`, 0); renderLobby(); });
-net.on('start', (d, from) => { if (net.isHost || from !== net.hostId) return; lobby.gameMode = modeOf(d.mode); if (d.players) applyLobbyPlayers(d.players, d.colors); if (d.map) lobby.map = knownMap(d.map); if (d.bal !== undefined) lobby.ballistics = !!d.bal; if (d.diff) lobby.diff = d.diff; if (d.mob) lobby.mob = d.mob; lobby.weaponMode = weaponModeOf(d.weaponMode).key; lobby.skin = skinOf(d.skin).key; startMatch(!!d.late, d.spawns ? d.spawns[net.id] : d.spawn, modeOf(d.mode)); if (d.combat && teamMode()) match.receive(d.combat); if (d.late && Array.isArray(d.grenades)) player.syncGrenades(d.grenades); if (d.broken) for (const id of d.broken) { const br = level.breakables[id]; if (br) breakProp(br, null, false, true); } });
+net.on('start', (d, from) => { if (net.isHost || from !== net.hostId) return; lobby.gameMode = modeOf(d.mode); if (d.players) applyLobbyPlayers(d.players, d.colors); if (d.map) lobby.map = knownMap(d.map); if (d.bal !== undefined) lobby.ballistics = !!d.bal; if (d.fall !== undefined) lobby.fall = !!d.fall; if (d.diff) lobby.diff = d.diff; if (d.mob) lobby.mob = d.mob; lobby.weaponMode = weaponModeOf(d.weaponMode).key; lobby.skin = skinOf(d.skin).key; startMatch(!!d.late, d.spawns ? d.spawns[net.id] : d.spawn, modeOf(d.mode)); if (d.combat && teamMode()) match.receive(d.combat); if (d.late && Array.isArray(d.grenades)) player.syncGrenades(d.grenades); if (d.broken) for (const id of d.broken) { const br = level.breakables[id]; if (br) breakProp(br, null, false, true); } if (d.lifts) for (let i = 0; i < d.lifts.length; i++) level.lifts?.[i]?.snap?.(d.lifts[i]); });
 net.on('startreq', () => { if (net.isHost && game.state === 'lobby') hostStart(); });
 
 // ---------------- co-op: the host owns the enemies, everyone else mirrors them ----------------
@@ -952,6 +953,14 @@ net.on('botshots', (d, from) => {
   else { if (d.bal) bullets.fire(null, origin, end.sub(origin).normalize(), { cosmetic: true, mv: d.mv || 330, maxRange: 65, ink: r?.ink ?? INK.BLUE }); else effects.tracer(origin, end, r?.ink ?? INK.BLUE, .02, .08); r?.flash(); audio.remoteShot(d.k, origin); }
 });
 net.on('brk', (d) => { const br = level.breakables[d.id]; if (br) breakProp(br, null, false); });
+net.on('lift', (d) => { const lift = level.lifts?.[d.id]; if (lift) lift.call(d.floor); });
+ctx.pressButton = (btn, local) => {
+  if (!btn?.lift) return;
+  const moved = btn.lift.call(btn.floor);
+  audio.button(btn.pos);
+  if (moved) hud.tip(btn.kind === 'call' ? ts('CALL · FLOOR {}', btn.floor + 1) : ts('FLOOR {}', btn.floor + 1), 1.1);
+  if (local && net.active) net.broadcast('lift', { id: btn.lift.id, floor: btn.floor });
+};
 net.on('parry', (d) => { if (teamMode() && d.life != null && (d.round !== match.state?.round || d.life !== match.applied.get(net.id))) return; audio.shieldHit(player.center); input.rumble(0.35, 0.3, 60); effects.strokeBurst(player.eye.clone().addScaledVector(player.forward, 0.5), INK.ORANGE, 8, 5, { life: 0.2, size: 0.03 }); hud.kill(d.ret ? 'RETURN TO SENDER' : 'DEFLECTED', d.ret ? 25 : 0); });
 net.on('shots', (d, from) => {
   const r = remote.get(from); if (!r || !r.root || !r.alive) return;
@@ -1058,7 +1067,7 @@ async function createLobby(isPublic) {
   setStatus('opening a lobby…');
   try { await net.host({ isPublic }); }
   catch (err) { setStatus(friendlyError(err)); unlockButtons(); return; }
-  lobby.isPublic = isPublic; lobby.map = mapKey; lobby.ballistics = settings.ballistics; lobby.diff = settings.difficulty; lobby.mob = lobby.mob || 'mid'; lobby.players.clear(); colorSeats.clear(); lobby.players.set(net.id, { name: myName, color: 0, appearance: myAppearance, team: 0, bot: false }); player.color = 0; player.ink = playerInk(0); lobby.hostId = net.id; lobby.status = ''; lobby.weaponMode = 'normal'; lobby.skin = skinKey; net._meta = { name: myName, appearance: myAppearance }; applyRules();
+  lobby.isPublic = isPublic; lobby.map = mapKey; lobby.ballistics = settings.ballistics; lobby.fall = settings.fallDamage; lobby.diff = settings.difficulty; lobby.mob = lobby.mob || 'mid'; lobby.players.clear(); colorSeats.clear(); lobby.players.set(net.id, { name: myName, color: 0, appearance: myAppearance, team: 0, bot: false }); player.color = 0; player.ink = playerInk(0); lobby.hostId = net.id; lobby.status = ''; lobby.weaponMode = 'normal'; lobby.skin = skinKey; net._meta = { name: myName, appearance: myAppearance }; applyRules();
   game.state = 'lobby'; screen = 'lobby'; showStart();
 }
 async function joinLobby(code) {
@@ -1187,7 +1196,7 @@ function mapHTML(sel, canPick, ffa = false, team = false) {
   const list = team ? LEVELS : arenaMaps(ffa); if (list.length < 2) return '';
   const selected = list.find(m => m.key === sel);
   const landmark = selected?.reference ? `<div class="map-note">${ts(selected.note)}<br>${ts('Map reference')}: <a href="${selected.reference}" target="_blank" rel="noopener">${ts(selected.referenceName)}</a></div>` : '';
-  const reference = sel === 'zijingang' ? `<div class="map-note">${ts('Campus-inspired layout - 480 x 360 m - expanded campus and lakeside')}<br>${ts('Map reference')}: <a href="https://map.zju.edu.cn/" target="_blank" rel="noopener">${ts('Campus map')}</a> · &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a></div>` : sel === 'timesquare' ? `<div class="map-note">${ts('New York at dusk - 100 x 220 m - Broadway, Duffy Square and landmark towers')}<br>${ts('Map reference')}: <a href="https://www.timessquarenyc.org/" target="_blank" rel="noopener">Times Square Alliance</a></div>` : '';
+  const reference = sel === 'zijingang' ? `<div class="map-note">${ts('Campus-inspired layout - 480 x 360 m - expanded campus and lakeside')}<br>${ts('Map reference')}: <a href="https://map.zju.edu.cn/" target="_blank" rel="noopener">${ts('Campus map')}</a> · &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a></div>` : sel === 'timesquare' ? `<div class="map-note">${ts('New York at dusk - 100 x 220 m - Broadway, Duffy Square and landmark towers')}<br>${ts('Map reference')}: <a href="https://www.timessquarenyc.org/" target="_blank" rel="noopener">Times Square Alliance</a></div>` : sel === 'dinghao' ? `<div class="map-note">${ts('Zhongguancun Dinghao DH3 Block B - six floors, lifts and an atrium')}<br>${ts('Map reference')}: <a href="https://en.wikipedia.org/wiki/Zhongguancun" target="_blank" rel="noopener">${ts('Zhongguancun')}</a></div>` : '';
   return `<div class="mapsel" id="mapsel"><span>${ts('map')}</span>${list.map((m) => `<button type="button" class="mapbtn${m.key === sel ? ' on' : ''}" data-map="${m.key}" ${canPick ? '' : 'disabled'}>${ts(m.name)}<i>${ts(m.blurb)}</i></button>`).join('')}</div>${reference}${landmark}`;
 }
 function wireMap(onPick) { const box = hud.el.panel.querySelector('#mapsel'); if (!box) return; box.addEventListener('click', (e) => { e.stopPropagation(); const b = e.target.closest('.mapbtn'); if (b && !b.disabled) onPick(b.dataset.map); }); }
@@ -1296,6 +1305,13 @@ function ballHTML(sel, canPick) {
   ];
   return `<div class="modesel" id="ballsel"><span>shots</span>${opts.map((o) => `<button type="button" class="modebtn${o.on === !!sel ? ' on' : ''}" data-bal="${o.on ? '1' : '0'}" ${canPick ? '' : 'disabled'}>${o.name}<i>${o.blurb}</i></button>`).join('')}</div>`;
 }
+function fallHTML(sel, canPick) {
+  const opts = [
+    { on: false, name: 'NO FALL DAMAGE', blurb: 'drop from anywhere · only the page edge hurts' },
+    { on: true, name: 'FALL DAMAGE', blurb: 'a long drop hurts · glass and atriums matter' },
+  ];
+  return `<div class="modesel" id="fallsel"><span>${ts('falls')}</span>${opts.map((o) => `<button type="button" class="modebtn${o.on === !!sel ? ' on' : ''}" data-fall="${o.on ? '1' : '0'}" ${canPick ? '' : 'disabled'}>${ts(o.name)}<i>${ts(o.blurb)}</i></button>`).join('')}</div>`;
+}
 function weaponModeHTML(selected, canPick) {
   return `<div class="modesel weapon-modes" id="weaponsel"><span>${ts('weapon mode')}</span>${Object.entries(WEAPON_MODES).map(([key, rule]) => `<button type="button" class="modebtn${key === selected ? ' on' : ''}" data-weapons="${key}" aria-pressed="${key === selected}" ${canPick ? '' : 'disabled'}>${ts(rule.name)}<i>${ts(rule.blurb)}</i></button>`).join('')}</div>`;
 }
@@ -1311,6 +1327,7 @@ function lobbyHTML() {
       ${weaponModeHTML(ctx.weaponMode(), host)}
       ${mapHTML(matchMap(lobby.map || mapKey, lobby.gameMode), host, !isCoop, isTeamMode(lobby.gameMode))}
       ${ballHTML(lobby.ballistics, host)}
+      ${fallHTML(lobby.fall, host)}
       ${diffHTML(ctx.difficulty(), host)}
       ${isCoop ? '' : mobHTML(lobby.mob || 'mid', host)}
       <div class="hint">${lobby.isPublic ? 'this lobby is public: anyone can quick play in, or type the code' : 'private lobby: friends type this code under PLAY ONLINE → JOIN'}</div>
@@ -1346,6 +1363,7 @@ function wireOnline() {
   if (q('modesel')) q('modesel').addEventListener('click', (e) => { const b = e.target.closest('.modebtn'); if (!b || b.disabled || !net.isHost) return; lobby.gameMode = modeOf(b.dataset.mode); lobby.map = matchMap(lobby.map || mapKey, lobby.gameMode); if (!isTeamMode(lobby.gameMode)) for (const [id, p] of [...lobby.players]) if (p.bot) removeRemote(id); balanceTeams(); broadcastLobby(); });
   if (q('weaponsel')) q('weaponsel').addEventListener('click', (e) => { const b = e.target.closest('.modebtn'); if (!b || b.disabled || !net.isHost || game.state !== 'lobby') return; lobby.weaponMode = weaponModeOf(b.dataset.weapons).key; applyRules(); broadcastLobby(); });
   if (q('ballsel')) q('ballsel').addEventListener('click', (e) => { const b = e.target.closest('.modebtn'); if (!b || b.disabled || !net.isHost) return; lobby.ballistics = b.dataset.bal === '1'; broadcastLobby(); });
+  if (q('fallsel')) q('fallsel').addEventListener('click', (e) => { const b = e.target.closest('.modebtn'); if (!b || b.disabled || !net.isHost) return; lobby.fall = b.dataset.fall === '1'; broadcastLobby(); });
   if (q('diffsel')) q('diffsel').addEventListener('click', (e) => { const b = e.target.closest('.modebtn'); if (!b || b.disabled || !net.isHost) return; lobby.diff = b.dataset.diff; applyRules(); broadcastLobby(); });
   if (q('mobsel')) q('mobsel').addEventListener('click', (e) => { const b = e.target.closest('.modebtn'); if (!b || b.disabled || !net.isHost) return; lobby.mob = b.dataset.mob; applyRules(); broadcastLobby(); });
   if (q('rejoinBtn')) q('rejoinBtn').addEventListener('click', () => { const c = lobby.rejoinCode; lobby.rejoinCode = null; lockButtons(box); joinLobby(c); });
@@ -1421,7 +1439,7 @@ function hostStart() {
   // deal everyone a different spot, shuffled so the same people do not always start together
   setArena(mode !== 'coop'); const order = spawnSpots().map((_, i) => i); for (let i = order.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; }
   const spawns = {}; [...lobby.players.keys()].forEach((id, i) => { spawns[id] = order[i % order.length]; });
-  net.send('start', { spawns, players: lobbyRows(), colors: reservedColors(), map: lobby.map || mapKey, mode, bal: !!lobby.ballistics, diff: ctx.difficulty(), mob: lobby.mob, weaponMode: ctx.weaponMode(), skin: ctx.skin() }); startMatch(false, spawns[net.id], mode); if (isTeamMode(mode)) match.start(); sendScores();
+  net.send('start', { spawns, players: lobbyRows(), colors: reservedColors(), map: lobby.map || mapKey, mode, bal: !!lobby.ballistics, fall: !!lobby.fall, diff: ctx.difficulty(), mob: lobby.mob, weaponMode: ctx.weaponMode(), skin: ctx.skin() }); startMatch(false, spawns[net.id], mode); if (isTeamMode(mode)) match.start(); sendScores();
   if (mode === 'coop') startWave(1);
 }
 function startMatch(late, spawnIdx, mode = 'ffa') {
@@ -1514,7 +1532,7 @@ function step(now) {
     game.time += sdt; if (player.shieldT > 0) player.shieldT -= dt;
     musicHealT -= dt; if (musicHealT <= 0) { musicHealT = 2; if (musicWanted && st === 'play' && !audio.musicPlaying && audio.ctx) audio.musicOn(true); if (input.anyInput) audio.resume(); }
     { const B = level.bounds, bp = player.body.pos; if (bp.x < B.minX - 8 || bp.x > B.maxX + 8 || bp.z < B.minZ - 8 || bp.z > B.maxZ + 8 || bp.y > 150) bp.y = -100; }
-    player.update(sdt); player.tickGrenades?.(dt); bullets.update(sdt); enemies.update(sdt); effects.update(sdt); updatePickups(sdt); netUpdate(dt);
+    level.update?.(sdt, ctx); player.update(sdt); player.tickGrenades?.(dt); bullets.update(sdt); enemies.update(sdt); effects.update(sdt); updatePickups(sdt); netUpdate(dt);
     // the co-op host runs the waves for the whole lobby; clients get told what came out of them
     if (st === 'play' && (!online() || coopHost())) updateWaves(sdt);
     if (online() && game.mode !== 'demolition') updateArenaPickups(dt);

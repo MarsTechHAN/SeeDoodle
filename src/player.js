@@ -9,6 +9,7 @@ const STAM_FIRE = 0.09, STAM_DRAIN = 0.08, STAM_GROUND = 0.4, STAM_AIR = 0.2, ST
 import { clamp, damp, rand, Spring, alignYAxis } from './util.js';
 import { audio } from './audio.js';
 import { OPT_DEFAULTS, diffOf, mobOf, MOB_FULL, weaponModeOf } from './settings.js';
+import { ts } from './i18n.js';
 
 const G = 26, WALK = 6.6, SPRINT = 10.6, CROUCH = 3.6, ACCEL = 140, FRICTION = 8, AIR_ACCEL = 36, AIR_CAP = 7.5, JUMP = 9.6;
 const STAND_H = 1.75, CROUCH_H = 1.05, EYE_STAND = 1.6, EYE_CROUCH = 0.88;
@@ -321,6 +322,12 @@ export class Player {
       if (Math.abs(step) <= b.stepHeight + 1e-3) this._stepOffset = clamp(this._stepOffset - step, -b.stepHeight, b.stepHeight);
     }
     const bounds = ctx.level.bounds;
+    if (b.onGround && ctx.level.conveyors) {
+      for (const c of ctx.level.conveyors) {
+        if (b.pos.x < c.min.x || b.pos.x > c.max.x || b.pos.y < c.min.y || b.pos.y > c.max.y || b.pos.z < c.min.z || b.pos.z > c.max.z) continue;
+        b.pos.x += c.vx * dt; b.pos.z += c.vz * dt;
+      }
+    }
     if (b.pos.y < (ctx.level.fallY ?? -12) || b.pos.x < bounds.minX - 8 || b.pos.x > bounds.maxX + 8 || b.pos.z < bounds.minZ - 8 || b.pos.z > bounds.maxZ + 8) {
       // Team deaths must resolve at the fall, before the survival-mode rescue relocates C4.
       this.detachGrapple(false); if (this.onFall?.() === true) return;
@@ -331,6 +338,10 @@ export class Player {
       const impact = clamp(-b.landVel / 14, 0, 1.5); this.landDip.kick(-impact * 6 - 0.5); audio.land(impact);
       if (impact > 0.8) { ctx.effects.shakeAmt += impact * 0.15; ctx.input.rumble(impact * 0.4, 0.2, 80); }
       if (Math.hypot(b.vel.x, b.vel.z) > 9) this.landGraceT = 0.4;
+      if (this.alive && ctx.fallDamage?.()) {
+        const drop = -b.landVel;
+        if (drop > 16) this.takeDamage(Math.min(this.maxHp || 110, (drop - 16) * 6.2), null);
+      }
     }
     this.lastGround = b.onGround;
     // ---- regen, bob, footsteps ----
@@ -373,6 +384,19 @@ export class Player {
     this.weapon.animate(dt, st);
     ctx.hud.setAds(this.weapon.isGun && this.weapon.aimAmt > 0.55);
     ctx.hud.setScope(!!this.weapon.scope && this.weapon.aimAmt > 0.62);
+    this._updateLookUse(inp);
+  }
+  // Lift buttons are shot, not walked up to: the reticle on the panel is the whole of the use.
+  _updateLookUse(inp) {
+    const ctx = this.ctx, buttons = ctx.level.buttons;
+    this.lookUse = null;
+    if (!buttons || !buttons.length) return;
+    const hit = ctx.world.raycast(this.aimOrigin, this.aimFwd, 3.8);
+    const btn = hit?.box?.data?.button;
+    if (!btn || hit.dist > 3.8) return;
+    this.lookUse = btn;
+    ctx.hud.tip(btn.kind === 'call' ? ts('CALL · FLOOR {}', btn.floor + 1) : ts('FLOOR {}', btn.floor + 1), 0.4);
+    if (inp.pressed('interact') && ctx.pressButton) ctx.pressButton(btn, true);
   }
   get knifeStatus() { const knife = this.weapons[this.katanaIndex]; return { state: this.weapon === knife && knife.charging ? 'charging' : 'idle', charge: knife.charge, multiplier: 1 + 2 * (knife.charge <= 0.1 ? 0 : knife.charge) }; }
   cancelKnife() { this.weapons[this.katanaIndex].cancelCharge(); }
