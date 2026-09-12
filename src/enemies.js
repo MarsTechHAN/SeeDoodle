@@ -4,6 +4,7 @@ import { makeInkMaterial, setFill, INK } from './render.js';
 import { makeBody, SEE_THROUGH } from './physics.js';
 import { rand, randInt, clamp, damp, wrapAngle, angleLerp, choose, alignYAxis, TAU } from './util.js';
 import { audio } from './audio.js';
+import { appearanceOf } from './settings.js';
 
 const _v = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3(), _d = new THREE.Vector3(), _q = new THREE.Quaternion(), _m = new THREE.Matrix4(), _s = new THREE.Vector3();
 const _up = new THREE.Vector3(0, 1, 0), _eye = new THREE.Vector3(), _goal = new THREE.Vector3();
@@ -49,6 +50,66 @@ function noodle(len, r, mat, parent, x, y, z, bow = 0.05) {
 }
 function mitten(r, mat, parent, y) { const m = new THREE.Mesh(new THREE.SphereGeometry(r, 7, 5), mat); m.position.y = y; m.scale.set(1, 1.15, 0.8); parent.add(m); return m; }
 function shoe(mat, parent, y, s = 1) { const m = new THREE.Mesh(new THREE.SphereGeometry(0.1 * s, 7, 5), mat); m.position.set(0, y, 0.06 * s); m.scale.set(1, 0.62, 1.9); parent.add(m); return m; }
+
+// The shaded outfit uses a small shared kit: respawns and flying body parts can keep their
+// geometry without allocating another wardrobe every life. Hit markers stay on the old rig.
+const outfitGeometry = new Map(), outfitMaterials = new Map();
+function kitGeometry(kind) {
+  if (!outfitGeometry.has(kind)) {
+    const g = kind === 'box' ? new THREE.BoxGeometry(1, 1, 1) : kind === 'tube' ? new THREE.CylinderGeometry(1, 0.86, 1, 10) : kind === 'cap' ? new THREE.SphereGeometry(1, 14, 7, 0, TAU, 0, Math.PI * 0.53) : new THREE.SphereGeometry(1, 12, 9);
+    g.userData.sharedOutfit = true; outfitGeometry.set(kind, g);
+  }
+  return outfitGeometry.get(kind);
+}
+function kit(kind, sx, sy, sz, x, y, z, mat, parent) {
+  const m = new THREE.Mesh(kitGeometry(kind), mat); m.scale.set(sx, sy, sz); m.position.set(x, y, z); parent.add(m); return m;
+}
+function outfitMaterial(surface, ink = INK.BLACK) {
+  const key = surface + ':' + ink;
+  if (!outfitMaterials.has(key)) outfitMaterials.set(key, makeInkMaterial({ ink, surface, side: THREE.DoubleSide }));
+  return outfitMaterials.get(key);
+}
+function solidLimb(len, r, mat, parent, x, y, z) {
+  const g = new THREE.Group(); g.position.set(x, y, z); parent.add(g);
+  kit('tube', r, len, r, 0, -len * 0.5, 0, mat, g);
+  kit('sphere', r, r, r, 0, -0.025, 0, mat, g);
+  const mid = new THREE.Object3D(); mid.position.y = -len * 0.55; g.add(mid);
+  g.userData.mid = mid; g.userData.len = len; return g;
+}
+function toonFace(headG, dark, skin, gender) {
+  const eyes = new THREE.Group(), xeyes = new THREE.Group(); headG.add(eyes, xeyes); xeyes.visible = false;
+  const whites = outfitMaterial('plaster'), browWidth = gender === 'male' ? 0.1 : gender === 'female' ? 0.079 : 0.09;
+  for (const s of [-1, 1]) {
+    kit('sphere', 0.051, 0.035, 0.018, s * 0.085, 0.026, 0.206, whites, eyes);
+    kit('sphere', 0.019, 0.025, 0.012, s * 0.084, 0.024, 0.221, dark, eyes);
+    const brow = kit('box', browWidth, gender === 'male' ? 0.026 : 0.019, 0.022, s * 0.084, 0.086, 0.197, dark, eyes); brow.rotation.z = s * -0.12;
+    for (const a of [-0.6, 0.6]) kit('box', 0.076, 0.014, 0.016, s * 0.085, 0.025, 0.22, dark, xeyes).rotation.z = a;
+  }
+  kit('sphere', 0.035, 0.054, 0.04, 0, -0.026, 0.213, skin, headG);
+  kit('box', 0.084, 0.012, 0.02, 0, -0.106, 0.194, dark, headG).rotation.z = -0.06;
+  return { eyes, xeyes };
+}
+function toonHair(parent, style, dark) {
+  if (style === 'bald') return;
+  kit('cap', 0.248, style === 'crop' ? 0.26 : 0.285, 0.225, 0, 0.035, -0.006, dark, parent);
+  if (style === 'short') for (let i = 0; i < 3; i++) kit('sphere', 0.085, 0.065, 0.13, -0.115 + i * 0.09, 0.25 + i * 0.012, 0.105, dark, parent).rotation.z = -0.4;
+  else if (style === 'curly') for (let i = 0; i < 9; i++) {
+    const a = i * TAU / 9; kit('sphere', 0.095, 0.095, 0.095, Math.cos(a) * 0.2, 0.195 + Math.sin(a) * 0.028, Math.sin(a) * 0.18, dark, parent);
+  }
+  else if (style === 'bob') {
+    kit('sphere', 0.242, 0.27, 0.18, 0, -0.02, -0.118, dark, parent);
+    for (const s of [-1, 1]) kit('sphere', 0.072, 0.22, 0.14, s * 0.224, -0.008, -0.015, dark, parent).rotation.z = s * -0.13;
+  }
+  else if (style === 'ponytail') {
+    kit('sphere', 0.078, 0.085, 0.095, 0, 0.08, -0.225, dark, parent);
+    kit('sphere', 0.095, 0.25, 0.115, 0, -0.082, -0.32, dark, parent).rotation.x = 0.28;
+  }
+}
+export function disposeModelGeometry(root) {
+  if (!root) return;
+  const seen = new Set();
+  root.traverse((o) => { const g = o.geometry; if (g && !g.userData.sharedOutfit && !seen.has(g)) { seen.add(g); g.dispose(); } });
+}
 // dot eyes, angry brows and a curved mouth, all solid ink so they read at a glance
 function doodleFace(headG, solid, opts = {}) {
   const eyes = new THREE.Group(); headG.add(eyes);
@@ -73,6 +134,32 @@ function buildHat(headG, mat, solid, T) {
   else if (h === 'crown') { for (let i = 0; i < 6; i++) { const a = (i / 6) * TAU; const sp = new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.26, 4), mat); sp.position.set(Math.cos(a) * 0.22, 0.34, Math.sin(a) * 0.22); headG.add(sp); } const b = new THREE.Mesh(new THREE.TorusGeometry(0.24, 0.035, 4, 14), mat); b.rotation.x = Math.PI / 2; b.position.y = 0.24; headG.add(b); }
 }
 export function buildWeaponProp(gun, mat, solid, T) {
+  if (T.skin === 'toon' && !['boss', 'slam', 'mortar'].includes(T.weapon)) {
+    const metal = outfitMaterial('metal'), grip = outfitMaterial('cloth'), glass = outfitMaterial('glass');
+    if (T.weapon === 'blade') {
+      kit('box', 0.026, 0.06, 0.95, 0, 0.04, 0.42, outfitMaterial('metal', INK.BLUE), gun);
+      kit('box', 0.14, 0.12, 0.035, 0, 0.04, -0.06, metal, gun);
+      kit('box', 0.045, 0.065, 0.24, 0, 0.04, -0.19, grip, gun);
+      for (let i = 0; i < 3; i++) kit('box', 0.048, 0.068, 0.025, 0, 0.04, -0.12 - i * 0.065, mat, gun);
+    } else if (T.weapon === 'grenade') {
+      kit('sphere', 0.14, 0.16, 0.14, 0, 0.035, 0.08, mat, gun);
+      kit('box', 0.06, 0.09, 0.08, 0, 0.195, 0.08, metal, gun);
+      kit('box', 0.035, 0.18, 0.03, 0.09, 0.16, 0.08, metal, gun).rotation.z = -0.35;
+    } else if (T.weapon === 'rocket') {
+      kit('tube', 0.12, 1.2, 0.12, 0, 0.05, 0.25, mat, gun).rotation.x = Math.PI / 2;
+      kit('tube', 0.14, 0.08, 0.14, 0, 0.05, 0.85, metal, gun).rotation.x = Math.PI / 2;
+      kit('box', 0.07, 0.19, 0.08, 0, -0.1, 0.08, grip, gun);
+    } else {
+      const pistol = T.weapon === 'pistol', sniper = T.weapon === 'sniper';
+      kit('box', pistol ? 0.07 : 0.12, 0.14, pistol ? 0.28 : 0.56, 0, 0.025, 0.16, metal, gun);
+      kit('box', pistol ? 0.074 : 0.124, 0.065, pistol ? 0.19 : 0.33, 0, 0.04, 0.14, mat, gun);
+      kit('tube', 0.028, sniper ? 0.88 : pistol ? 0.12 : 0.4, 0.028, 0, 0.054, sniper ? 0.8 : pistol ? 0.32 : 0.59, metal, gun).rotation.x = Math.PI / 2;
+      kit('box', 0.065, 0.18, 0.09, 0, -0.1, 0.1, grip, gun);
+      if (!pistol) { kit('box', 0.07, 0.13, 0.25, 0, 0.015, -0.19, grip, gun); kit('box', 0.055, 0.055, 0.07, 0, 0.12, 0.14, metal, gun); }
+      if (sniper) { kit('tube', 0.055, 0.28, 0.055, 0, 0.16, 0.09, metal, gun).rotation.x = Math.PI / 2; kit('sphere', 0.04, 0.04, 0.014, 0, 0.16, 0.239, glass, gun); }
+    }
+    return;
+  }
   if (T.weapon === 'blade') { bx(0.02, 0.05, 0.95, 0, 0.04, 0.42, mat, gun); bx(0.11, 0.11, 0.03, 0, 0.04, -0.06, solid, gun); bx(0.035, 0.045, 0.24, 0, 0.04, -0.19, solid, gun); }
   else if (T.weapon === 'shotgun') { bx(0.1, 0.13, 0.66, 0, 0.02, 0.2, mat, gun); const b = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.5, 6), solid); b.rotation.x = Math.PI / 2; b.position.set(0, 0.08, 0.5); gun.add(b); }
   else if (T.weapon === 'sniper') { bx(0.075, 0.11, 0.6, 0, 0.02, 0.15, mat, gun); const b = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.95, 6), solid); b.rotation.x = Math.PI / 2; b.position.set(0, 0.05, 0.72); gun.add(b); bx(0.06, 0.07, 0.22, 0, 0.13, 0.06, solid, gun); }
@@ -83,28 +170,59 @@ export function buildWeaponProp(gun, mat, solid, T) {
 
 export function buildHumanoid(mat, solid, T) {
   const root = new THREE.Group(); const parts = {}, J = {};
+  const toon = T.skin === 'toon', appearance = appearanceOf(T.appearance), skin = toon ? outfitMaterial('skin', appearance.tone) : mat, dark = toon ? outfitMaterial('cloth') : solid;
   const build = T.build || {};
   const bodyW = build.bodyW ?? 1, headS = build.headS ?? 1, limbR = build.limbR ?? 0.032;
   const jit = rand(0.95, 1.06); // every figure is drawn slightly differently
   const hips = new THREE.Group(); hips.position.y = 0.86; root.add(hips);
   parts.hips = new THREE.Object3D(); hips.add(parts.hips);
   const torso = new THREE.Group(); torso.position.y = 0.04; hips.add(torso);
-  blob(0.3 * bodyW, 0.3, 0.19 * bodyW, 0, 0.26, 0, mat, torso);
+  if (toon) {
+    const shoulder = appearance.gender === 'male' ? 1.055 : appearance.gender === 'female' ? 0.95 : 1;
+    kit('sphere', 0.3 * bodyW * shoulder, 0.32, 0.19 * bodyW, 0, 0.26, 0, mat, torso);
+    kit('box', 0.39 * bodyW, 0.18, 0.27, 0, -0.015, 0, dark, hips);
+    kit('box', 0.5 * bodyW, 0.06, 0.34, 0, 0.04, 0, dark, torso);
+    kit('box', 0.018, 0.39, 0.026, 0, 0.26, 0.192 * bodyW, dark, torso);
+    for (const s of [-1, 1]) {
+      kit('box', 0.105 * bodyW, 0.12, 0.045, s * 0.145 * bodyW, 0.27, 0.18 * bodyW, dark, torso);
+      kit('box', 0.09 * bodyW, 0.023, 0.049, s * 0.145 * bodyW, 0.31, 0.182 * bodyW, mat, torso);
+    }
+    kit('box', 0.068, 0.042, 0.018, -0.14 * bodyW, 0.435, 0.16 * bodyW, outfitMaterial('plaster'), torso);
+    kit('box', 0.075, 0.06, 0.021, 0, 0.04, 0.176, outfitMaterial('metal'), torso);
+  } else blob(0.3 * bodyW, 0.3, 0.19 * bodyW, 0, 0.26, 0, mat, torso);
   parts.torso = new THREE.Object3D(); parts.torso.position.y = 0.26; torso.add(parts.torso);
-  const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.05, 0.12, 6), mat); neck.position.y = 0.56; torso.add(neck);
+  if (toon) kit('tube', 0.085, 0.18, 0.085, 0, 0.57, 0, skin, torso);
+  else { const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.05, 0.12, 6), mat); neck.position.y = 0.56; torso.add(neck); }
   const headG = new THREE.Group(); headG.position.y = 0.62; torso.add(headG);
-  const head = blob(0.275 * headS * jit, 0.3 * headS, 0.25 * headS, 0, 0.26, 0, mat, headG);
+  if (toon) {
+    const width = appearance.gender === 'male' ? 0.246 : appearance.gender === 'female' ? 0.225 : 0.236;
+    kit('sphere', width * headS, 0.285 * headS, 0.218 * headS, 0, 0.26, 0, skin, headG);
+    if (appearance.gender === 'male') kit('sphere', 0.165 * headS, 0.098 * headS, 0.16 * headS, 0, 0.076, 0.018, skin, headG);
+  }
+  else blob(0.275 * headS * jit, 0.3 * headS, 0.25 * headS, 0, 0.26, 0, mat, headG);
   parts.head = new THREE.Object3D(); parts.head.position.y = 0.26; headG.add(parts.head);
   const faceG = new THREE.Group(); faceG.position.y = 0.26; faceG.scale.setScalar(headS); headG.add(faceG);
-  const fc = doodleFace(faceG, solid, { ez: 0.2 * headS + 0.06, smile: T.weapon === 'blade' });
-  const hatG = new THREE.Group(); hatG.position.y = 0.26; hatG.scale.setScalar(headS); headG.add(hatG); buildHat(hatG, mat, solid, T);
+  const fc = toon ? toonFace(faceG, dark, skin, appearance.gender) : doodleFace(faceG, solid, { ez: 0.2 * headS + 0.06, smile: T.weapon === 'blade' });
+  const hatG = new THREE.Group(); hatG.position.y = 0.26; hatG.scale.setScalar(headS); headG.add(hatG);
+  if (toon) {
+    toonHair(hatG, appearance.hair, dark);
+    for (const s of [-1, 1]) { kit('sphere', 0.052, 0.081, 0.046, s * 0.232, -0.012, 0, skin, hatG); if (appearance.hair !== 'bald') kit('box', 0.032, 0.075, 0.065, s * 0.219, 0.042, 0.035, dark, hatG); }
+    if (T.hat === 'cap' && !T.appearance) { kit('cap', 0.262, 0.18, 0.246, 0, 0.15, -0.015, mat, hatG); kit('box', 0.32, 0.026, 0.23, 0, 0.145, 0.195, mat, hatG).rotation.x = -0.08; }
+    else if (T.hat === 'helmet') { kit('cap', 0.276, 0.265, 0.262, 0, 0.072, -0.018, mat, hatG); kit('box', 0.32, 0.075, 0.035, 0, 0.11, 0.213, outfitMaterial('glass'), hatG); }
+    else if (T.hat === 'band') kit('box', 0.4, 0.055, 0.065, 0, 0.135, 0.19, mat, hatG);
+    else if (!T.appearance || T.hat !== 'cap') buildHat(hatG, mat, dark, T);
+  } else buildHat(hatG, mat, solid, T);
   const shY = 0.46, shX = 0.26 * bodyW;
-  const armL = noodle(0.3, limbR, mat, torso, -shX, shY, 0), armR = noodle(0.3, limbR, mat, torso, shX, shY, 0);
-  const foreL = noodle(0.28, limbR * 0.92, mat, armL, 0, -0.3, 0), foreR = noodle(0.28, limbR * 0.92, mat, armR, 0, -0.3, 0);
-  mitten(limbR * 2.3, mat, foreL, -0.3); mitten(limbR * 2.3, mat, foreR, -0.3);
-  const legL = noodle(0.42, limbR * 1.15, mat, hips, -0.13 * bodyW, -0.02, 0), legR = noodle(0.42, limbR * 1.15, mat, hips, 0.13 * bodyW, -0.02, 0);
-  const shinL = noodle(0.42, limbR * 1.05, mat, legL, 0, -0.42, 0), shinR = noodle(0.42, limbR * 1.05, mat, legR, 0, -0.42, 0);
-  shoe(mat, shinL, -0.42, bodyW); shoe(mat, shinR, -0.42, bodyW);
+  const limb = toon ? solidLimb : noodle, armRadii = toon ? Math.min(0.12, 0.09 * Math.sqrt(bodyW)) : limbR;
+  const armL = limb(0.3, armRadii, mat, torso, -shX, shY, 0), armR = limb(0.3, armRadii, mat, torso, shX, shY, 0);
+  const foreL = limb(0.28, armRadii * (toon ? 0.84 : 0.92), mat, armL, 0, -0.3, 0), foreR = limb(0.28, armRadii * (toon ? 0.84 : 0.92), mat, armR, 0, -0.3, 0);
+  if (toon) for (const fore of [foreL, foreR]) { kit('tube', armRadii * 0.89, 0.065, armRadii * 0.89, 0, -0.247, 0, dark, fore); kit('sphere', 0.075, 0.093, 0.066, 0, -0.3, 0.012, skin, fore); }
+  else { mitten(limbR * 2.3, mat, foreL, -0.3); mitten(limbR * 2.3, mat, foreR, -0.3); }
+  const legRadii = toon ? Math.min(0.135, 0.105 * Math.sqrt(bodyW)) : limbR * 1.15;
+  const legL = limb(0.42, legRadii, toon ? dark : mat, hips, -0.13 * bodyW, -0.02, 0), legR = limb(0.42, legRadii, toon ? dark : mat, hips, 0.13 * bodyW, -0.02, 0);
+  const shinL = limb(0.42, toon ? legRadii * 0.84 : limbR * 1.05, toon ? dark : mat, legL, 0, -0.42, 0), shinR = limb(0.42, toon ? legRadii * 0.84 : limbR * 1.05, toon ? dark : mat, legR, 0, -0.42, 0);
+  if (toon) for (const shin of [shinL, shinR]) { kit('sphere', 0.108, 0.085, 0.17, 0, -0.39, 0.047, dark, shin); kit('box', 0.12, 0.1, 0.035, 0, -0.075, 0.076, mat, shin); }
+  else { shoe(mat, shinL, -0.42, bodyW); shoe(mat, shinR, -0.42, bodyW); }
   for (const [k, g] of [['armL', armL], ['armR', armR], ['foreL', foreL], ['foreR', foreR], ['legL', legL], ['legR', legR], ['shinL', shinL], ['shinR', shinR]]) parts[k] = g.userData.mid;
   const gun = new THREE.Group(); gun.position.set(0, -0.29, 0.07); foreR.add(gun); buildWeaponProp(gun, mat, solid, T);
   const tip = new THREE.Object3D(); tip.position.set(0, 0.05, T.weapon === 'blade' ? 0.92 : T.weapon === 'boss' ? 0.4 : 0.78); gun.add(tip);
@@ -275,9 +393,9 @@ export class EnemyManager {
   clear() { for (const e of this.enemies) { this._removeLaser(e); if (!e.rootDetached) this.ctx.scene.remove(e.root); } this.enemies.length = 0; this.alive = 0; this.byId.clear(); this.projectiles.clear(); this.armorTold = false; }
   spawn(type, pos, id = null) {
     const T = TYPES[type]; const ink = T.ink ?? INK.RED;
-    const mat = makeInkMaterial({ ink, shadeScale: 0, shadeBias: 1 });
+    const mat = makeInkMaterial({ ink, surface: 'cloth', shadeScale: 0, shadeBias: 1 });
     const solid = makeInkMaterial({ ink: T.ink === INK.BLACK ? INK.RED : INK.BLACK, fill: true, side: THREE.DoubleSide });
-    const model = T.model === 'bomber' ? buildBomber(mat, solid, T) : T.model === 'blob' ? buildBomber(mat, solid, T, true) : T.model === 'flyer' ? buildFlyer(mat, solid, T) : buildHumanoid(mat, solid, T);
+    const model = T.model === 'bomber' ? buildBomber(mat, solid, T) : T.model === 'blob' ? buildBomber(mat, solid, T, true) : T.model === 'flyer' ? buildFlyer(mat, solid, T) : buildHumanoid(mat, solid, { ...T, skin: this.ctx.skin?.() });
     const hw = T.flying ? 0.45 : Math.min(0.33 * T.scale, 0.9);
     const e = { type, T, mat, root: model.root, parts: model.parts, J: model.J, tip: model.tip, face: model.face, hit: model.hit, hp: T.hp, maxHp: T.hp, alive: true, state: 'spawn', t: 0,
       body: makeBody(pos, hw, (T.flying ? 0.8 : 1.85) * T.scale, T.boss ? 1.2 : 0.6), center: new THREE.Vector3(), yaw: rand(0, TAU), yawT: 0, phase: rand(0, TAU), walk: 0, aimAmt: 0, flinch: 0, flashT: 0, flashOn: false,

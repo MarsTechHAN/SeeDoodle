@@ -35,10 +35,22 @@ export class Net {
     this.handlers = new Map(); this.connected = false;
     this.onPeerJoin = null; this.onPeerLeave = null; this.onDisconnect = null; this.onAlias = null; this.onHostChange = null;
     this.onStall = null; this.onPeerStall = null;
-    this.maxPlayers = 10; this._accepting = true; this._inMatch = false; this._hostName = '';
+    this.maxPlayers = 32; this._accepting = true; this._inMatch = false; this._hostName = '';
     this.stats = { sent: 0, recv: 0 }; this.isPublic = false;
     this._waits = new Map(); this._waitSeq = 0; this._pingT = null; this.rtt = 0;
     this.token = null; this.resuming = false; this._resumeSeat = null; this._meta = {}; this.pings = {};
+    this._serverOffset = Date.now() - performance.now(); this._serverLast = 0; this._clockReady = false; this._clockSamples = [];
+  }
+  // A fuse must keep running across frame stalls, sleep and wall-clock adjustments. Server time
+  // gives every peer the same deadline; performance.now keeps local countdowns monotonic.
+  serverNow() { return this._serverLast = Math.max(this._serverLast, performance.now() + this._serverOffset); }
+  _syncClock(now, rtt = null) {
+    if (!Number.isFinite(now)) return;
+    const offset = now + (rtt || 0) / 2 - performance.now();
+    if (!this._clockReady) { this._serverOffset = offset; this._serverLast = 0; this._clockReady = true; }
+    if (rtt === null || !Number.isFinite(rtt) || rtt < 0 || rtt > 5000) return;
+    this._clockSamples.push({ rtt, offset }); if (this._clockSamples.length > 8) this._clockSamples.shift();
+    this._serverOffset = this._clockSamples.reduce((a, b) => a.rtt <= b.rtt ? a : b).offset;
   }
   get active() { return !!this.sock && this.connected; }
   get peerIds() { return [...this.conns.keys()]; }
@@ -77,8 +89,9 @@ export class Net {
         sock.onmessage = (ev) => this._onMessage(ev.data);
         sock.onclose = () => this._onClose();
         sock.onerror = () => { /* onclose always follows */ };
-        // liveness, not measurement - the server times the round trip from its own side. Often
-        // enough that a couple of lost ones do not look like somebody who walked away.
+        // These pings synchronise fuse deadlines and keep the socket alive. Hit judging still
+        // measures round trips independently from the server's side.
+        this._raw({ t: 'ping', d: performance.now() });
         this._pingT = setInterval(() => this._raw({ t: 'ping', d: performance.now() }), 5000);
         if (this._hostName) this._raw({ t: 'name', name: this._hostName });
         resolve();
@@ -166,7 +179,7 @@ export class Net {
     if (!m || typeof m !== 'object') return;
     this.stats.recv++;
     switch (m.t) {
-      case 'hello': this.id = m.id; if (m.token) this.token = m.token; if (m.max) this.maxPlayers = m.max; break;
+      case 'hello': this.id = m.id; if (m.token) this.token = m.token; if (m.max) this.maxPlayers = m.max; this._syncClock(m.now); break;
       case 'created': this._settle('create', null, m); break;
       case 'joined': this._settle('join', null, m) || this._settle('quick', null, m); break;
       case 'resumed': this._settle('resume', null, m); break;
@@ -212,7 +225,9 @@ export class Net {
       // the server times our round trip itself so it knows how far to rewind the world when it
       // judges a shot; all this end has to do is answer, echoing its clock back untouched
       case 'ping': this._raw({ t: 'pong', d: m.d }); break;
-      case 'pong': if (typeof m.d === 'number') this.rtt = Math.round(performance.now() - m.d); break;
+      case 'pong':
+        if (Number.isFinite(m.d)) { const rtt = performance.now() - m.d; this.rtt = Math.round(rtt); this._syncClock(m.now, rtt); }
+        break;
       // everyone's round trip as the server measures it; -1 is a seat whose link is quiet
       case 'pings': this.pings = m.p || {}; break;
       default: break;

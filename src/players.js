@@ -4,8 +4,9 @@
 // whether it is shooting at a bot or a friend.
 import * as THREE from 'three';
 import { makeInkMaterial, setFill, setInk, INK, INK_COLORS } from './render.js';
-import { buildHumanoid, buildWeaponProp } from './enemies.js';
+import { buildHumanoid, buildWeaponProp, disposeModelGeometry } from './enemies.js';
 import { SEE_THROUGH } from './physics.js';
+import { appearanceOf } from './settings.js';
 import { clamp, damp, angleLerp, wrapAngle } from './util.js';
 
 const _v = new THREE.Vector3(), _v2 = new THREE.Vector3(), _up = new THREE.Vector3(0, 1, 0);
@@ -13,13 +14,14 @@ const _tagHead = new THREE.Vector3(), _tagScreen = new THREE.Vector3(), _tagEye 
 const WEAPON_KINDS = ['rifle', 'shotgun', 'sniper', 'blade', 'rocket', 'grenade'];
 const HIT = [['head', 0.3], ['torso', 0.33], ['hips', 0.2], ['armL', 0.11], ['armR', 0.11], ['foreL', 0.1], ['foreR', 0.1], ['legL', 0.13], ['legR', 0.13], ['shinL', 0.11], ['shinR', 0.11]];
 
-// A room has ten seats. The host deals these slots once; names, score order and the viewer's
-// identity never choose a colour. HUD swatches use the renderer's palette so they match the figure.
+// Seat identity survives colour reuse in larger rooms. The host deals 32 stable slots; the
+// ten-colour renderer palette repeats without renumbering anybody already in the room.
+export const PLAYER_CAPACITY = 32;
 export const PLAYER_INKS = [INK.BLUE, INK.GREEN, INK.ORANGE, INK.PINK, INK.TEAL, INK.VIOLET, INK.BROWN, INK.RED, INK.BLACK, INK.OLIVE];
-export const validPlayerColor = (slot) => Number.isInteger(slot) && slot >= 0 && slot < PLAYER_INKS.length;
-export const playerInk = (slot) => PLAYER_INKS[validPlayerColor(slot) ? slot : 0];
+export const validPlayerColor = (slot) => Number.isInteger(slot) && slot >= 0 && slot < PLAYER_CAPACITY;
+export const playerInk = (slot) => PLAYER_INKS[validPlayerColor(slot) ? slot % PLAYER_INKS.length : 0];
 const PLAYER_CSS = PLAYER_INKS.map((ink) => '#' + INK_COLORS[ink].toArray().map((v) => Math.round(v * 255).toString(16).padStart(2, '0')).join(''));
-export const playerColorCSS = (slot) => PLAYER_CSS[validPlayerColor(slot) ? slot : 0];
+export const playerColorCSS = (slot) => PLAYER_CSS[validPlayerColor(slot) ? slot % PLAYER_CSS.length : 0];
 
 // what a player broadcasts about itself, ~20 times a second:
 // position, look, weapon, state flags, hp, velocity and (while grappling) where the hook is
@@ -29,24 +31,27 @@ export function encodeLocal(P, weaponIndex, extra = {}) {
     (P.crouching ? 1 : 0) | (P.sliding ? 2 : 0) | (P.isBlocking ? 4 : 0) | (P._aiming ? 8 : 0) | (b.onGround ? 16 : 0) | (extra.firing ? 32 : 0) | (P.alive ? 64 : 0) | (grappling ? 128 : 0) | (P.parryWindow ? 256 : 0) | (extra.idle ? 512 : 0) | (extra.untouched ? 1024 : 0) | (extra.away ? 2048 : 0),
     Math.round(P.hp), +b.vel.x.toFixed(1), +b.vel.y.toFixed(1), +b.vel.z.toFixed(1)];
   if (grappling) out.push(+g.hook.x.toFixed(1), +g.hook.y.toFixed(1), +g.hook.z.toFixed(1));
+  if (Number.isSafeInteger(extra.round) && Number.isSafeInteger(extra.life)) { while (out.length < 14) out.push(0); out.push(extra.round, extra.life); }
   return out;
 }
 
 export class RemotePlayer {
-  constructor(ctx, id, name, team, ink) {
+  constructor(ctx, id, name, team, ink, appearance) {
     this.ctx = ctx; this.id = id; this.name = name || 'doodle'; this.team = team; this.ink = ink;
+    this.appearance = appearanceOf(appearance);
     this.isLocal = false; this.alive = true; this.parryWindow = false; this.idle = false; this.idleSince = 0; this.untouched = false; this.away = false; this.hp = 100; this.maxHp = 100; this.speed = 0; this.weaponIndex = 0;
     this.body = { pos: new THREE.Vector3(0, -50, 0), vel: new THREE.Vector3(), halfW: 0.35, height: 1.75, onGround: true };
     this.center = new THREE.Vector3(); this.eye = new THREE.Vector3(); this.forward = new THREE.Vector3(0, 0, -1); this.right = new THREE.Vector3(1, 0, 0);
     this.yaw = 0; this.pitch = 0; this.crouching = false; this.sliding = false; this.blocking = false; this.aiming = false; this.firing = false;
     this.snapA = null; this.snapB = null; this.phase = 0; this.walk = 0; this.flashT = 0; this.deadT = 0; this.kills = 0; this.deaths = 0; this.score = 0;
-    this.mat = makeInkMaterial({ ink, shadeScale: 0, shadeBias: 1 }); this.solid = makeInkMaterial({ ink: INK.BLACK, fill: true, side: THREE.DoubleSide });
+    this.viewHidden = false; this.viewSamples = []; this.viewEpoch = 0;
+    this.mat = makeInkMaterial({ ink, surface: 'cloth', shadeScale: 0, shadeBias: 1 }); this.solid = makeInkMaterial({ ink: INK.BLACK, fill: true, side: THREE.DoubleSide });
     this.tagMat = makeInkMaterial({ ink, fill: true, side: THREE.DoubleSide });
     this.nameTag = document.createElement('div'); this.nameTag.className = 'player-nametag'; this.nameTag.hidden = true;
     this.nameTag.dir = 'auto'; this.nameTag.textContent = this.name;
     this.nameTag.style.setProperty('--player-color', playerColorCSS(PLAYER_INKS.indexOf(ink)));
     ctx.hud.root.prepend(this.nameTag); this._nameSightAt = 0; this._nameInSight = false;
-    this.T = { weapon: 'rifle', scale: 1.0, hat: 'cap', build: { bodyW: 1, headS: 1, limbR: 0.033 }, blockRadius: 0 };
+    this.T = { weapon: 'rifle', scale: 1.0, hat: 'cap', skin: ctx.skin?.() === 'toon' ? 'toon' : 'classic', appearance: this.appearance, build: { bodyW: 1, headS: 1, limbR: 0.033 }, blockRadius: 0 };
     this.hit = HIT; this.hitSpheres = HIT.map(() => new THREE.Vector3()); this.vel = new THREE.Vector3(); this.grappling = false; this.gPoint = new THREE.Vector3();
     this._buildModel();
     // the grapple rope: a thin line from the hand to wherever the hook is
@@ -57,19 +62,36 @@ export class RemotePlayer {
     const model = buildHumanoid(this.mat, this.solid, this.T);
     this.root = model.root; this.parts = model.parts; this.J = model.J; this.face = model.face;
     this.root.visible = false; this.ctx.scene.add(this.root); this.weaponIndex = -1;
-    // The world-space flag shares its ink with the screen-space username.
-    this.tagG = new THREE.Group(); this.root.add(this.tagG); this.tagG.position.y = 2.25;
-    const flag = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.28, 0.02), this.tagMat); this.tagG.add(flag);
+    // The jacket and compact username carry identity; retain the anchor without a floating flag.
+    this.tagG = new THREE.Group(); this.root.add(this.tagG); this.tagG.position.y = 2.25; this.tagG.visible = false;
     this.corpse = false;
   }
   setInk(ink) { this.ink = ink; setInk(this.mat, ink); setInk(this.tagMat, ink); this.nameTag.style.setProperty('--player-color', playerColorCSS(PLAYER_INKS.indexOf(ink))); }
+  setSkin(key) {
+    const skin = key === 'toon' ? 'toon' : 'classic'; if (this.T.skin === skin) return;
+    this.T.skin = skin; this._refreshModel();
+  }
+  setAppearance(value) {
+    const appearance = appearanceOf(value), old = this.appearance;
+    if (old.gender === appearance.gender && old.tone === appearance.tone && old.hair === appearance.hair) return;
+    this.appearance = this.T.appearance = appearance;
+    if (this.T.skin === 'toon') this._refreshModel();
+  }
+  _refreshModel() {
+    // Debris belongs to Effects after a death. Leave that body alone; respawn will use this skin.
+    if (!this.root || this.corpse) return;
+    const previous = this.root, weapon = this.weaponIndex, visible = previous.visible;
+    this._buildModel(); this.setWeapon(weapon); this.root.position.copy(previous.position); this.root.rotation.copy(previous.rotation); this.root.visible = visible;
+    this._animate(0); this.root.updateMatrixWorld(true);
+    this.ctx.scene.remove(previous); disposeModelGeometry(previous); this._nameSightAt = 0;
+  }
   updateNameTag(show, now = performance.now() / 1000) {
     const tag = this.nameTag, camera = this.ctx.camera;
     if (!show || !this.root || !this.root.visible || !this.alive || this.corpse || this.away) { tag.hidden = true; this._nameSightAt = 0; return; }
     _tagHead.setFromMatrixPosition(this.parts.head.matrixWorld);
     _tagEye.setFromMatrixPosition(camera.matrixWorld);
     const distance = _tagEye.distanceTo(_tagHead);
-    _tagScreen.copy(_tagHead); _tagScreen.y += 0.65; _tagScreen.project(camera);
+    _tagScreen.copy(_tagHead); _tagScreen.y += 0.44; _tagScreen.project(camera);
     if (distance > 120 || _tagScreen.z < -1 || _tagScreen.z > 1 || Math.abs(_tagScreen.x) > 1 || Math.abs(_tagScreen.y) > 1) { tag.hidden = true; this._nameSightAt = 0; return; }
     // Test the actual head, not the floating label: a name above a wall must not reveal its owner.
     // Ten checks a second per visible player keeps the map's collider scan out of every frame.
@@ -79,7 +101,7 @@ export class RemotePlayer {
     if (tag.textContent !== this.name) tag.textContent = this.name;
     const x = (_tagScreen.x * 0.5 + 0.5) * window.innerWidth, y = (0.5 - _tagScreen.y * 0.5) * window.innerHeight;
     tag.style.transform = `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0) translate(-50%, -100%)`;
-    tag.style.opacity = Math.max(0.45, 1 - Math.max(0, distance - 30) / 160).toFixed(2);
+    tag.style.opacity = (0.55 * Math.max(0.45, 1 - Math.max(0, distance - 30) / 160)).toFixed(2);
   }
   // knocked flat with some physics: the whole figure tumbles away as debris (bits come off on a
   // big hit), and a fresh figure is drawn when the player comes back
@@ -103,9 +125,11 @@ export class RemotePlayer {
   get blockRadius() { return 0; }
   setWeapon(i) {
     if (i === this.weaponIndex && this.J.gun.children.length) return; this.weaponIndex = i;
-    const gun = this.J.gun; while (gun.children.length) gun.remove(gun.children[0]);
+    const gun = this.J.gun; disposeModelGeometry(gun); gun.clear();
     const kind = WEAPON_KINDS[i] || 'rifle';
-    if (kind === 'grenade') {
+    gun.rotation.x = this.T.skin === 'toon' && !['blade', 'grenade'].includes(kind) ? Math.PI / 2 : 0;
+    if (this.T.skin === 'toon') buildWeaponProp(gun, this.mat, this.solid, { weapon: kind, skin: 'toon' });
+    else if (kind === 'grenade') {
       const body = new THREE.Mesh(new THREE.SphereGeometry(0.14, 8, 6), this.mat); body.position.set(0, 0.03, 0.08); gun.add(body);
       const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.09, 6), this.solid); cap.position.set(0, 0.17, 0.08); gun.add(cap);
       const pin = new THREE.Mesh(new THREE.TorusGeometry(0.055, 0.016, 4, 8), this.solid); pin.position.set(0, 0.24, 0.08); gun.add(pin);
@@ -116,6 +140,7 @@ export class RemotePlayer {
   }
   push(snap, t) {
     if (!snap) return;
+    const previous = this.snapB, wasAway = this.away;
     this.snapA = this.snapB || { p: new THREE.Vector3(snap[0], snap[1], snap[2]), yaw: snap[3], pitch: snap[4], t: t - 0.07 };
     this.snapB = { p: new THREE.Vector3(snap[0], snap[1], snap[2]), yaw: snap[3], pitch: snap[4], t };
     this.setWeapon(snap[5]); const f = snap[6];
@@ -123,10 +148,33 @@ export class RemotePlayer {
     const wasAlive = this.alive; this.alive = !!(f & 64); this.hp = snap[7];
     if (snap.length > 10) this.vel.set(snap[8], snap[9], snap[10]); else this.vel.set(0, 0, 0);
     this.grappling = !!(f & 128) && snap.length > 13; if (this.grappling) this.gPoint.set(snap[11], snap[12], snap[13]); this.parryWindow = !!(f & 256); const idle = !!(f & 512); if (idle && !this.idle) this.idleSince = t; this.idle = idle; this.untouched = !!(f & 1024); this.away = !!(f & 2048);
+    // Spectating needs more than the last packet pair: the delayed view often falls before
+    // that pair. Keep its presentation history separate from collision/hit interpolation.
+    const samples = this.viewSamples;
+    if (!previous || (!wasAlive && this.alive) || (wasAway && !this.away) || t < previous.t || t - previous.t > 1 || previous.p.distanceToSquared(this.snapB.p) > 36) { samples.length = 0; this.viewEpoch++; }
+    Object.assign(this.snapB, { eyeHeight: this.crouching ? .88 : 1.6, vx: this.vel.x, vy: this.vel.y, vz: this.vel.z });
+    if (samples.length && samples[samples.length - 1].t === t) samples.pop();
+    samples.push(this.snapB);
+    while (samples.length > 64 || (samples.length > 2 && samples[1].t < t - .6)) samples.shift();
     if (wasAlive && !this.alive) this.deadT = 0;
     if (this.alive && this.corpse) { this._buildModel(); this.setWeapon(snap[5]); this.snapA = null; this.body.pos.copy(this.snapB.p); }
-    if (this.root && !this.root.visible && !this.away) { this.body.pos.copy(this.snapB.p); this.root.visible = true; }
+    // A hidden first-person subject is still present. Reinitializing it on every packet
+    // makes its interpolated body jump ahead and then slide backwards on the next frame.
+    if (this.root && !this.root.visible && !this.away && !this.viewHidden) { this.body.pos.copy(this.snapB.p); this.root.visible = true; }
     if (this.root && this.away) this.root.visible = false;
+  }
+  sampleView(now, out) {
+    const samples = this.viewSamples; if (!samples.length) return false;
+    const at = now - .12;
+    let a = samples[0], b = a;
+    for (let i = 1; i < samples.length; i++) { b = samples[i]; if (b.t >= at) break; a = b; }
+    const k = a === b ? 0 : clamp((at - a.t) / (b.t - a.t), 0, 1);
+    out.eye.lerpVectors(a.p, b.p, k); out.eye.y += a.eyeHeight + (b.eyeHeight - a.eyeHeight) * k;
+    // Brief packet gaps can coast; a lost connection must not fly the camera through the map.
+    const late = clamp(at - b.t, 0, .1);
+    out.eye.x += b.vx * late; out.eye.y += b.vy * late; out.eye.z += b.vz * late;
+    out.yaw = angleLerp(a.yaw, b.yaw, k); out.pitch = a.pitch + (b.pitch - a.pitch) * k; out.epoch = this.viewEpoch;
+    return true;
   }
   // damage dealt to this player by the host's bots or by another player's shot goes to its owner
   takeDamage(amount, fromPos) { if (this.onDamage) this.onDamage(this, amount, fromPos); }
@@ -200,5 +248,10 @@ export class RemotePlayer {
     J.headG.rotation.x = clamp(-this.pitch, -0.7, 0.7) * 0.7;
     this.tagG.rotation.y = -this.root.rotation.y + (this.ctx.player ? Math.atan2(this.ctx.player.eye.x - this.body.pos.x, this.ctx.player.eye.z - this.body.pos.z) : 0);
   }
-  dispose() { this.nameTag.remove(); if (this.root) this.ctx.scene.remove(this.root); this.ctx.scene.remove(this.rope); this.ctx.scene.remove(this.hook); }
+  dispose() {
+    this.nameTag.remove();
+    if (this.root) { this.ctx.scene.remove(this.root); disposeModelGeometry(this.root); }
+    for (const o of [this.rope, this.hook]) { this.ctx.scene.remove(o); o.geometry.dispose(); o.material.dispose(); }
+    // A departed player's ragdoll may still use the body materials until Effects removes it.
+  }
 }

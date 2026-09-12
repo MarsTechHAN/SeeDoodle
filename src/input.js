@@ -4,18 +4,19 @@ import { clamp } from './util.js';
 const KEYMAP = {
   KeyW: 'forward', KeyS: 'back', KeyA: 'left', KeyD: 'right', ArrowUp: 'forward', ArrowDown: 'back', ArrowLeft: 'left', ArrowRight: 'right',
   Space: 'jump', ShiftLeft: 'sprint', ShiftRight: 'sprint', ControlLeft: 'crouch', KeyC: 'crouch',
-  KeyR: 'reload', KeyQ: 'grapple', KeyE: 'grapple', KeyF: 'melee', KeyV: 'melee',
+  KeyR: 'reload', KeyQ: 'grapple', KeyE: 'grapple', KeyF: 'melee', KeyV: 'melee', KeyB: 'interact', KeyN: 'bombDrop',
   Digit1: 'slot1', Digit2: 'slot2', Digit3: 'slot3', Digit4: 'slot4', Digit5: 'slot5', Escape: 'pause', KeyP: 'pause', Enter: 'confirm', KeyG: 'grenade', KeyX: 'dash', AltLeft: 'dash', KeyM: 'music', KeyT: 'talk', Tab: 'score',
 };
 const MOUSEMAP = { 0: 'fire', 2: 'aim', 1: 'grapple', 3: 'grapple', 4: 'melee' };
 // Standard gamepad mapping (DualSense): 0 cross,1 circle,2 square,3 triangle,4 L1,5 R1,6 L2,7 R2,8 create,9 options,10 L3,11 R3,12-15 dpad
 const PADMAP = { 0: 'jump', 1: 'crouch', 2: 'reload', 3: 'nextWeapon', 4: 'grapple', 5: 'melee', 6: 'aim', 7: 'fire', 9: 'pause', 10: 'sprint', 11: 'grenade', 12: 'grenade', 13: 'slot5', 14: 'prevWeapon', 15: 'nextWeapon', 8: 'score', 17: 'confirm' };
+const TIMED_ACTIONS = new Set(['fire', 'grenade', 'reload', 'aim', 'melee', 'nadeCancel', 'interact']);
 
 export class Input {
   constructor(canvas) {
     this.canvas = canvas;
     this.state = {}; this.prev = {}; this.frameState = {};
-    this.keys = {}; this.mouseBtns = {};
+    this.keys = {}; this.mouseBtns = {}; this.pressQueue = {}; this.framePresses = {};
     // written by TouchControls (src/touch.js) and read below like any other device
     this.touchKeys = {}; this.tmove = { x: 0, y: 0 }; this.usingTouch = false;
     this.move = { x: 0, y: 0 };
@@ -25,37 +26,61 @@ export class Input {
     this.usingGamepad = false; this.gamepadIndex = -1; this.padHoldTime = 0;
     this.pointerLocked = false; this.anyInput = false; this.lastPadButtons = [];
     this.onLockChange = null; this.onAnyInput = null; this.lastActive = performance.now();
-    this.invertY = false; this.onDeviceChange = null;
+    this.invertY = false; this.onDeviceChange = null; this.onControlCancel = null;
+    this.holdTimes = {}; this.holdSources = {}; this.timedTouch = new Set();
+    this.holdEvents = []; this.holdEventSeq = 0;
+    const cancelControls = () => {
+      this.keys = {}; this.mouseBtns = {}; this.pressQueue = {}; this.framePresses = {};
+      if (this.onControlCancel) this.onControlCancel();
+      for (const a of Object.keys(this.holdSources)) for (const source of [...this.holdSources[a]]) this.markHold(a, false, source);
+    };
 
     window.addEventListener('keydown', (e) => {
+      // Tab belongs to the held map only during play. Repeats must also suppress native focus
+      // traversal; otherwise a long hold escapes the game after the first keydown.
+      if (e.code === 'Tab') {
+        if (!(this.captureScore?.() ?? this.pointerLocked) || e.altKey || e.ctrlKey || e.metaKey) return;
+        e.preventDefault();
+      } else if (e.code !== 'Escape' && !this.pointerLocked && e.target?.closest?.('input, textarea, select, button, summary, a[href], [contenteditable]:not([contenteditable="false"])')) return;
+      if (['Space', 'ArrowUp', 'ArrowDown'].includes(e.code)) e.preventDefault();
       if (e.repeat) return;
       this.lastActive = performance.now(); const a = KEYMAP[e.code]; if (a) { this.keys[a] = true; if (this.usingGamepad && this.onDeviceChange) this.onDeviceChange(false); this.usingGamepad = false; }
+      if (a) this.pressQueue[a] = true;
+      if (a) this.markHold(a, true, 'key:' + e.code);
       if (!e.shiftKey) this.keys.sprint = false;
-      if (['Space', 'Tab', 'ArrowUp', 'ArrowDown'].includes(e.code)) e.preventDefault();
       this.anyInput = true;
     });
-    window.addEventListener('keyup', (e) => { const a = KEYMAP[e.code]; if (a) this.keys[a] = false; if (!e.shiftKey) this.keys.sprint = false; });
-    document.addEventListener('visibilitychange', () => { if (document.hidden) { this.keys = {}; this.mouseBtns = {}; } });
-    window.addEventListener('blur', () => { this.keys = {}; this.mouseBtns = {}; });
+    window.addEventListener('keyup', (e) => { const a = KEYMAP[e.code]; if (a) { this.keys[a] = false; this.markHold(a, false, 'key:' + e.code); } if (!e.shiftKey) this.keys.sprint = false; });
+    document.addEventListener('visibilitychange', () => { if (document.hidden) cancelControls(); });
+    window.addEventListener('blur', cancelControls);
     this.padState = {}; this.padPrev = {};
     document.addEventListener('mousemove', (e) => {
       if (!this.pointerLocked) return;
       let dx = e.movementX, dy = e.movementY;
       // guard against pointer-lock spikes
       if (Math.abs(dx) > 400) dx = 0; if (Math.abs(dy) > 400) dy = 0;
+      if (this.usingGamepad && this.onDeviceChange) this.onDeviceChange(false);
       this.mx += dx; this.my += dy; this.usingGamepad = false; this.lastActive = performance.now();
     });
     document.addEventListener('mousedown', (e) => {
+      // Touch-scrolling the map can emit compatibility mouse events; those are UI, not fire.
+      if (e.target?.closest?.('.board')) return;
       const a = MOUSEMAP[e.button]; if (a) this.mouseBtns[a] = true;
+      if (a && this.pointerLocked) this.pressQueue[a] = true;
+      if (a) this.markHold(a, true, 'mouse:' + e.button);
       if (this.usingGamepad && this.onDeviceChange) this.onDeviceChange(false);
       this.usingGamepad = false; this.anyInput = true; this.lastActive = performance.now();
       if (e.button === 1 || e.button === 3 || e.button === 4) e.preventDefault();
     });
-    document.addEventListener('mouseup', (e) => { const a = MOUSEMAP[e.button]; if (a) this.mouseBtns[a] = false; });
+    document.addEventListener('mouseup', (e) => { const a = MOUSEMAP[e.button]; if (a) { this.mouseBtns[a] = false; this.markHold(a, false, 'mouse:' + e.button); } });
     document.addEventListener('contextmenu', (e) => e.preventDefault());
-    document.addEventListener('wheel', (e) => { this.wheel += Math.sign(e.deltaY); }, { passive: true });
+    document.addEventListener('wheel', (e) => {
+      if (this.onWheel?.(e)) { e.preventDefault(); return; }
+      this.wheel += Math.sign(e.deltaY);
+    }, { passive: false });
     document.addEventListener('pointerlockchange', () => {
       this.pointerLocked = document.pointerLockElement === this.canvas;
+      if (!this.pointerLocked) cancelControls();
       if (this.onLockChange) this.onLockChange(this.pointerLocked);
     });
     window.addEventListener('gamepadconnected', (e) => { this.gamepadIndex = e.gamepad.index; });
@@ -82,7 +107,10 @@ export class Input {
   update(dt) {
     // rotate button states
     this.prev = this.state; this.state = {};
+    // Keep fast taps alive for one frame so a complete press/release cannot disappear.
+    this.framePresses = this.pressQueue; this.pressQueue = {};
     const s = this.state;
+    for (const k in this.framePresses) s[k] = true;
     for (const k in this.keys) if (this.keys[k]) s[k] = true;
     for (const k in this.mouseBtns) if (this.mouseBtns[k]) s[k] = true;
     for (const k in this.touchKeys) if (this.touchKeys[k]) s[k] = true;
@@ -112,12 +140,17 @@ export class Input {
       for (const idx in PADMAP) {
         const b = pad.buttons[idx]; if (!b) continue;
         const pressed = b.pressed || b.value > 0.35;
-        if (pressed) { s[PADMAP[idx]] = true; padS[PADMAP[idx]] = true; padActive = true; }
+        const action = idx === '13' && this.objectiveMode ? 'interact' : PADMAP[idx];
+        if (pressed) { s[action] = true; padS[action] = true; padActive = true; }
       }
       if (padActive) { if (!this.usingGamepad && this.onDeviceChange) this.onDeviceChange(true); this.usingGamepad = true; this.anyInput = true; this.lastActive = performance.now(); }
       this._pad = pad;
     } else this._pad = null;
     this.padPrev = this.padState; this.padState = padS;
+    for (const a of ['fire', 'grenade', 'reload', 'aim', 'melee', 'nadeCancel', 'pause', 'interact']) {
+      this.markHold(a, !!padS[a], 'pad');
+      if (!this.timedTouch.has(a)) this.markHold(a, !!this.touchKeys[a], 'touch');
+    }
 
     // a thumb on the stick outranks both: on a phone there is nothing else driving these
     if (this.tmove.x || this.tmove.y) { mx = this.tmove.x; my = this.tmove.y; }
@@ -127,11 +160,28 @@ export class Input {
     this.look.x = lx; this.look.y = this.invertY ? -ly : ly;
   }
 
+  // Input events preserve real press/release times even when rendering misses the whole hold.
+  markHold(a, down, source = 'touch') {
+    const sources = this.holdSources[a] ||= new Set(), wasHeld = sources.size > 0;
+    if (down) sources.add(source); else sources.delete(source);
+    const held = sources.size > 0; if (held === wasHeld) return;
+    const now = performance.now();
+    if (held) this.holdTimes[a] = { start: now, end: null, held: true };
+    else if (this.holdTimes[a]) { this.holdTimes[a].end = now; this.holdTimes[a].held = false; }
+    // A release and re-press between frames must interrupt both grenades and objective holds.
+    if (TIMED_ACTIONS.has(a)) {
+      this.holdEvents.push({ action: a, down: held, time: now, seq: ++this.holdEventSeq });
+      if (this.holdEvents.length > 256) this.holdEvents.splice(0, this.holdEvents.length - 256);
+    }
+  }
+  markTouchHold(a, down) { this.timedTouch.add(a); this.markHold(a, down, 'touch'); }
+  holdTiming(a) { return this.holdTimes[a] || null; }
+  holdEventsAfter(seq, until = performance.now()) { return this.holdEvents.filter((event) => event.seq > seq && event.time <= until); }
   down(a) { return !!this.state[a]; }
   get idleSeconds() { return (performance.now() - this.lastActive) / 1000; }
-  pressed(a) { return (!!this.state[a] && !this.prev[a]) || (!!this.padState[a] && !this.padPrev[a]); }
+  pressed(a) { return !!this.framePresses[a] || (!!this.state[a] && !this.prev[a]) || (!!this.padState[a] && !this.padPrev[a]); }
   released(a) { return !this.state[a] && !!this.prev[a]; }
-  consume(a) { this.state[a] = false; }
+  consume(a) { this.state[a] = false; delete this.framePresses[a]; }
   anyPressed() { for (const k in this.state) if (this.state[k] && !this.prev[k]) return true; return false; }
 
   rumble(strong = 0.5, weak = 0.5, ms = 80) {

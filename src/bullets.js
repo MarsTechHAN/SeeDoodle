@@ -48,20 +48,24 @@ export class Bullets {
       blastDmg: (gun && gun.blastDmg) || 0,
     };
     this.list.push(b);
-    if (!b.cosmetic && this.ctx.onBullet) this.ctx.onBullet(b);
+    if (!b.cosmetic && opts.notify !== false && this.ctx.onBullet) this.ctx.onBullet(b);
     return b;
   }
   clear() { this.list.length = 0; this.mesh.count = 0; }
   // Somebody else's rocket flown here for the look of it still has to make a bang -- `mine: false`
   // gives the boom and the shove without letting this machine decide what it killed.
   _detonate(b, point) {
-    this.ctx.player.explode(point, { R: b.blastR, enemyDmg: b.blastDmg, mine: !b.cosmetic, lift: 0, push: 11, selfBase: 12, selfMax: 58, pvpBase: 25, pvpMax: 115 });
+    this.ctx.player.explode(point, { R: b.blastR, enemyDmg: b.blastDmg, mine: !b.cosmetic, selfDamage: !b.invalidMatchLife, lift: 0, push: 11, selfBase: 12, selfMax: 58, pvpBase: 25, pvpMax: 115 });
   }
   update(dt) {
     const ctx = this.ctx, world = ctx.world, list = this.list;
     let n = 0, pelletHit = false;
     for (let i = 0; i < list.length; i++) {
-      const b = list[i]; b.life -= dt; if (b.life <= 0) { if (b.explosive) this._detonate(b, b.pos); continue; }
+      const b = list[i];
+      // A delayed local bullet may still be drawn after a round/life reset, but its old
+      // firing input must never become damage credited to the player's new life.
+      if (b.matchRound != null && (ctx.match?.state?.round !== b.matchRound || ctx.match.actor(ctx.match.net.id)?.life !== b.matchLife)) { b.cosmetic = true; b.invalidMatchLife = true; }
+      b.life -= dt; if (b.life <= 0) { if (b.explosive) this._detonate(b, b.pos); continue; }
       b.prev.copy(b.pos); b.vel.y -= b.grav * dt; b.pos.addScaledVector(b.vel, dt); b.t += dt;
       _d.subVectors(b.pos, b.prev); const len = _d.length();
       if (len < 1e-6) { list[n++] = b; continue; }

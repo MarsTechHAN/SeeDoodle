@@ -2,10 +2,11 @@
 // that only exists once you have found one, the katana, and a grenade held for grenade-only play.
 // Rounds are hitscan unless the match is running ballistics; rockets are always real projectiles.
 import * as THREE from 'three';
-import { makeInkMaterial, INK } from './render.js';
+import { makeInkMaterial, setInk, INK } from './render.js';
 import { SEE_THROUGH } from './physics.js';
 import { rand, clamp, damp, lerp, Spring3, TAU } from './util.js';
 import { audio } from './audio.js';
+import { appearanceOf } from './settings.js';
 
 const _v = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3();
 const easeOut = (t) => 1 - Math.pow(1 - t, 3);
@@ -15,11 +16,30 @@ function cyl(r, h, x, y, z, mat, parent, axis = 'z', seg = 8) { const g = new TH
 function sph(r, x, y, z, mat, parent, seg = 8) { const m = new THREE.Mesh(new THREE.SphereGeometry(r, seg, seg), mat); m.position.set(x, y, z); parent.add(m); return m; }
 function star(n = 7, r1 = 0.16, r2 = 0.06) { const s = new THREE.Shape(); for (let i = 0; i < n * 2; i++) { const a = (i / (n * 2)) * TAU, r = i % 2 === 0 ? r1 : r2; if (i === 0) s.moveTo(Math.cos(a) * r, Math.sin(a) * r); else s.lineTo(Math.cos(a) * r, Math.sin(a) * r); } s.closePath(); return new THREE.ShapeGeometry(s); }
 function frame(w, h, t, d, x, y, z, mat, parent) { const g = new THREE.Group(); g.position.set(x, y, z); parent.add(g); bx(w, t, d, 0, h / 2, 0, mat, g); bx(w, t, d, 0, -h / 2, 0, mat, g); bx(t, h, d, -w / 2, 0, 0, mat, g); bx(t, h, d, w / 2, 0, 0, mat, g); return g; }
-// doodle fist + forearm heading back toward the shoulder
+const viewMaterials = new Map();
+function viewMaterial(surface, ink = INK.BLACK) {
+  const key = surface + ':' + ink;
+  if (!viewMaterials.has(key)) viewMaterials.set(key, makeInkMaterial({ ink, surface }));
+  return viewMaterials.get(key);
+}
+// Keep both hands on the same animation pivot. Changing clothes must not reset a reload,
+// charge or swing, and none of these appearance meshes participates in damage or aiming.
 function hand(mat, x, y, z, parent, dir = [0.4, -0.5, 1], len = 0.42) {
-  sph(0.062, x, y, z, mat, parent); const d = new THREE.Vector3(...dir).normalize();
-  const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.05, len, 7), mat); arm.position.set(x + d.x * len / 2, y + d.y * len / 2, z + d.z * len / 2);
-  arm.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), d); parent.add(arm); return arm;
+  const vm = parent.userData.viewModel, d = new THREE.Vector3(...dir).normalize(), arm = new THREE.Group();
+  arm.position.set(x + d.x * len / 2, y + d.y * len / 2, z + d.z * len / 2); arm.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), d); parent.add(arm);
+  const classic = new THREE.Group(), toon = new THREE.Group(); arm.add(classic, toon);
+  sph(0.062, 0, -len / 2, 0, mat, classic); classic.add(new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.05, len, 7), mat));
+  const cloth = viewMaterial('cloth', vm?._appearanceInk ?? INK.BLUE), skin = viewMaterial('skin', vm?.appearance.tone ?? 2), glove = viewMaterial('cloth');
+  const sleeve = new THREE.Mesh(new THREE.CylinderGeometry(0.085, 0.065, len * 0.73, 10), cloth); sleeve.position.y = len * 0.12; toon.add(sleeve);
+  cyl(0.067, 0.055, 0, -len * 0.24, 0, glove, toon, 'y', 10);
+  cyl(0.043, len * 0.2, 0, -len * 0.36, 0, skin, toon, 'y', 9);
+  const palm = sph(0.076, 0, -len * 0.5, 0, skin, toon, 10); palm.scale.set(1, 0.86, 0.88);
+  const back = sph(0.066, 0, -len * 0.46, -0.027, glove, toon, 9); back.scale.set(1, 0.9, 0.5);
+  sph(0.027, 0.058, -len * 0.49, 0.035, skin, toon, 8);
+  bx(0.055, 0.06, 0.011, 0, len * 0.02, -0.076, viewMaterial('metal'), toon);
+  vm?.appearanceHands.push({ classic, toon, sleeve, skinMeshes: toon.children.filter((o) => o.material === skin) });
+  const shaded = vm?._skin === 'toon'; classic.visible = !shaded; toon.visible = shaded;
+  return arm;
 }
 function makeFlash(parent, x, y, z, scale) {
   const fm = makeInkMaterial({ ink: INK.ORANGE, fill: true, side: THREE.DoubleSide }); const g = new THREE.Group();
@@ -31,6 +51,7 @@ function makeFlash(parent, x, y, z, scale) {
 class ViewModel {
   constructor(ctx) {
     this.ctx = ctx; this.root = new THREE.Group(); this.scale = 0.46; this.root.scale.setScalar(this.scale); this.root.visible = false;
+    this.root.userData.viewModel = this; this.appearanceHands = []; this.appearance = appearanceOf(); this._skin = ctx.skin?.() === 'toon' ? 'toon' : 'classic'; this._appearanceInk = INK.BLUE;
     this.basePos = new THREE.Vector3(0.2, -0.17, -0.36); this.baseRot = new THREE.Vector3(0, 0, 0);
     this.aimPos = new THREE.Vector3(0, -0.13, -0.3); this.adsFov = 60; this.isGun = false;
     this.recoil = new Spring3(260, 18); this.recoilRot = new Spring3(220, 16);
@@ -38,6 +59,18 @@ class ViewModel {
     this.aimAmt = 0; this.sprintAmt = 0; this.equipT = 0;
   }
   get allowed() { return !this.ctx.player?.weaponAllowed || this.ctx.player.weaponAllowed(this.kind); }
+  setSkin(key, ink = INK.BLUE) {
+    this._skin = key === 'toon' ? 'toon' : 'classic'; this._appearanceInk = ink;
+    const toon = this._skin === 'toon';
+    if (this.mat) setInk(this.mat, toon ? ink : INK.BLUE);
+    for (const h of this.appearanceHands) { h.classic.visible = !toon; h.toon.visible = toon; h.sleeve.material = viewMaterial('cloth', ink); }
+    if (this.appearanceDetails) this.appearanceDetails.visible = toon;
+  }
+  setAppearance(value) {
+    this.appearance = appearanceOf(value);
+    const skin = viewMaterial('skin', this.appearance.tone);
+    for (const h of this.appearanceHands) for (const m of h.skinMeshes) m.material = skin;
+  }
   setSight(x, y, z, dist) { this.aimPos.set(-x * this.scale, -y * this.scale, -z * this.scale - dist); }
   equip() { this.equipT = 0; this.root.visible = true; }
   unequip() { this.root.visible = false; }
@@ -84,8 +117,30 @@ export class Gun extends ViewModel {
     // How many rounds into the current burst we are, and how long that count has left to live. The
     // recoil pattern is a function of this: see `fire`.
     this.burst = 0; this.burstT = 0;
-    this.mat = makeInkMaterial({ ink: INK.BLUE }); this.dark = makeInkMaterial({ ink: INK.BLACK }); this.red = makeInkMaterial({ ink: INK.RED, fill: true });
-    this.build(); this.setSight(...this.sight);
+    this.mat = makeInkMaterial({ ink: INK.BLUE, surface: 'metal' }); this.dark = makeInkMaterial({ ink: INK.BLACK, surface: 'metal' }); this.red = makeInkMaterial({ ink: INK.RED, fill: true });
+    this.build(); this._finishAppearance(); this.setSight(...this.sight);
+  }
+  _finishAppearance() {
+    const g = this.appearanceDetails = new THREE.Group(); this.root.add(g);
+    const black = viewMaterial('cloth'), metal = viewMaterial('metal'), accent = this.mat;
+    if (this.kind !== 'revolver') {
+      const side = this.kind === 'rocket' ? 0.087 : 0.05;
+      for (const s of [-1, 1]) {
+        bx(0.008, 0.033, 0.17, s * side, 0.025, this.kind === 'rocket' ? -0.25 : 0.025, black, g);
+        for (let i = 0; i < 3; i++) bx(0.01, 0.018, 0.018, s * (side + 0.002), 0.026, -0.032 + i * 0.05, accent, g);
+      }
+      if (this.magMesh) {
+        for (const s of [-1, 1]) for (let i = 0; i < 3; i++) bx(0.006, 0.012, 0.064, s * 0.031, -0.06 + i * 0.032, 0, black, this.magMesh).userData.toonPanel = true;
+      }
+    }
+    if (this.kind === 'shotgun' && this.foreEnd) for (let i = 0; i < 5; i++) bx(0.082, 0.088, 0.012, 0, 0, -0.1 + i * 0.045, black, this.foreEnd).userData.toonPanel = true;
+    if (this.kind === 'sniper') cyl(0.05, 0.008, 0, 0.135, 0.181, viewMaterial('glass'), g);
+    if (this.kind === 'revolver') cyl(0.008, 0.049, 0, -0.09, 0.073, metal, g, 'x', 7);
+    this.setSkin(this._skin, this._appearanceInk);
+  }
+  setSkin(key, ink = INK.BLUE) {
+    super.setSkin(key, ink);
+    this.root.traverse((o) => { if (o.userData.toonPanel) o.visible = this._skin === 'toon'; });
   }
   get spreadPx() { return 5 + this.spreadCur * 900; }
   // A thumb dragging a screen cannot make the small corrections a mouse can, so on a phone the guns
@@ -361,34 +416,111 @@ export class Rocket extends Gun {
 
 export class Grenade extends ViewModel {
   constructor(ctx) {
-    super(ctx); this.name = 'GRENADES'; this.hint = 'hold fire or grenade to aim - release to throw'; this.kind = 'grenade'; this.locked = true;
-    this.basePos.set(0.2, -0.2, -0.38); this.aimPos.copy(this.basePos);
-    const mat = makeInkMaterial({ ink: INK.BLUE }), dark = makeInkMaterial({ ink: INK.BLACK }), orange = makeInkMaterial({ ink: INK.ORANGE });
-    sph(0.16, 0, 0, 0, dark, this.root);
-    cyl(0.06, 0.1, 0, 0.17, 0, orange, this.root, 'y', 6);
-    const pin = new THREE.Mesh(new THREE.TorusGeometry(0.07, 0.02, 4, 8), orange); pin.position.set(0, 0.24, 0); this.root.add(pin);
-    hand(mat, 0, -0.1, 0.035, this.root, [0.45, -0.5, 1]);
+    super(ctx); this.name = 'GRENADES'; this.hint = 'hold to charge and aim - R pulls pin, release throws, RMB / V cancels or drops'; this.kind = 'grenade'; this.locked = true;
+    this.scale = 0.32; this.root.scale.setScalar(this.scale);
+    this.basePos.set(0.24, -0.2, -0.44); this.aimPos.copy(this.basePos);
+    this.grip = new THREE.Group(); this.root.add(this.grip);
+    this.payload = new THREE.Group(); this.grip.add(this.payload);
+    this.raise = 0; this.throwAt = null; this.poseAt = performance.now();
+    this.wrist = new THREE.Vector3(); this.elbow = new THREE.Vector3(); this.shoulder = new THREE.Vector3(1.45, -1.35, 1.3);
+    const mat = this.mat = makeInkMaterial({ ink: INK.BLUE, surface: 'metal' }), dark = makeInkMaterial({ ink: INK.BLACK, surface: 'metal' }), orange = makeInkMaterial({ ink: INK.ORANGE, surface: 'metal' });
+    sph(0.16, 0, 0, 0, dark, this.payload);
+    cyl(0.06, 0.1, 0, 0.17, 0, orange, this.payload, 'y', 6);
+    const pin = this.pin = new THREE.Mesh(new THREE.TorusGeometry(0.07, 0.02, 4, 8), orange); pin.position.set(0, 0.24, 0); this.payload.add(pin);
+    this._buildThrowingArm();
+    const g = this.appearanceDetails = new THREE.Group(); this.payload.add(g);
+    for (const y of [-0.065, 0.04]) { const band = new THREE.Mesh(new THREE.TorusGeometry(Math.sqrt(0.16 * 0.16 - y * y), 0.012, 5, 12), mat); band.rotation.x = Math.PI / 2; band.position.y = y; g.add(band); }
+    bx(0.035, 0.2, 0.03, 0.11, 0.15, 0, orange, g).rotation.z = -0.3;
+    this.setSkin(this._skin, this._appearanceInk);
+    // Composite this view model after the world; alpha cannot be blended into packed ink data.
+    this.root.traverse((o) => o.layers.set(1)); this.root.userData.viewOpacity = 0.68;
+    this.ctx.camera.userData.translucentViewModel = this.root;
   }
   get spreadPx() { return 4; }
+  _buildThrowingArm() {
+    const cloth = viewMaterial('cloth', this._appearanceInk), skin = viewMaterial('skin', this.appearance.tone), glove = viewMaterial('cloth');
+    const segment = (r1, r2) => {
+      const pivot = new THREE.Group(), classic = new THREE.Group(), toon = new THREE.Group(); pivot.add(classic, toon); this.root.add(pivot);
+      classic.add(new THREE.Mesh(new THREE.CylinderGeometry(r1 * 0.72, r2 * 0.72, 1, 8), this.mat));
+      const sleeve = new THREE.Mesh(new THREE.CylinderGeometry(r1, r2, 1, 10), cloth); toon.add(sleeve);
+      this.appearanceHands.push({ classic, toon, sleeve, skinMeshes: [] }); return pivot;
+    };
+    this.upperArm = segment(0.11, 0.1); this.forearm = segment(0.095, 0.06);
+    const classic = new THREE.Group(), toon = new THREE.Group(); this.grip.add(classic, toon);
+    const sleeve = cyl(0.063, 0.085, 0, -0.16, 0.135, cloth, toon, 'y', 10); sleeve.rotation.x = -0.3;
+    const palm = sph(0.079, 0, -0.075, 0.13, skin, toon, 10); palm.scale.set(1, 1.12, 0.64);
+    sph(0.06, 0, -0.087, 0.163, glove, toon, 9).scale.set(1, 1, 0.42);
+    sph(0.068, 0, -0.075, 0.13, this.mat, classic, 8).scale.set(1, 1.12, 0.65);
+    this.fingers = [];
+    for (const [group, material] of [[classic, this.mat], [toon, skin]]) {
+      for (let i = 0; i < 4; i++) {
+        const finger = new THREE.Group(); finger.position.set(-0.054 + i * 0.036, -0.025, 0.13); group.add(finger);
+        cyl(0.017, 0.07, 0, 0.03, 0, material, finger, 'y', 7);
+        const tip = new THREE.Group(); tip.position.y = 0.064; finger.add(tip);
+        cyl(0.015, 0.05, 0, 0.022, 0, material, tip, 'y', 7);
+        this.fingers.push({ finger, tip });
+      }
+      const thumb = cyl(0.026, 0.095, -0.067, -0.022, 0.083, material, group, 'y', 8); thumb.rotation.z = -0.6; thumb.rotation.x = -0.55;
+    }
+    const skinMeshes = []; toon.traverse((o) => { if (o.material === skin) skinMeshes.push(o); });
+    this.appearanceHands.push({ classic, toon, sleeve, skinMeshes });
+  }
+  _armSegment(segment, from, to) {
+    _v.subVectors(to, from); segment.position.copy(from).addScaledVector(_v, 0.5);
+    segment.scale.set(1, _v.length(), 1); segment.quaternion.setFromUnitVectors(_v2.set(0, 1, 0), _v.normalize());
+  }
+  resetThrowPose() { this.throwAt = null; this.raise = 0; this.payload.visible = true; this.poseAt = performance.now(); }
+  equip() { this.resetThrowPose(); super.equip(); }
+  unequip() { this.resetThrowPose(); super.unequip(); }
+  // A quick release can interrupt the raise; start the swing at that pose rather than snapping to full charge.
+  onGrenadeThrow(charge = 0) { this.throwAt = performance.now(); this.throwCharge = charge; this.throwRaise = this.raise; this.payload.visible = false; }
   update() {
-    // Player owns the shared grenade input and cooldown, so FIRE and G cannot produce two throws.
-    const charge = this.ctx.player?._nadeHeld ? this.ctx.player.nadeCharge : 0;
-    this.root.position.y += charge * 0.045; this.root.position.z += charge * 0.06; this.root.rotation.x -= charge * 0.35;
+    const state = this.ctx.player?.grenadeStatus, held = !!state && state.state !== 'idle';
+    const now = performance.now(), dt = Math.max(0, (now - this.poseAt) / 1000); this.poseAt = now;
+    const elapsed = this.throwAt === null ? Infinity : (now - this.throwAt) / 1000;
+    const throwing = elapsed < 0.5, p = this.root.position, r = this.root.rotation;
+    if (!throwing) this.raise = damp(this.raise, held ? 1 : 0, 22, dt);
+    this.pin.visible = state?.state !== 'armed';
+    this.payload.visible = !throwing || elapsed >= 0.38;
+    let open = 0, reach = 0;
+    if (throwing) {
+      // The projectile already left on release: follow through empty-handed, then fetch the next one below view.
+      const swing = clamp(elapsed / 0.15, 0, 1), lower = easeInOut(clamp((elapsed - 0.15) / 0.2, 0, 1));
+      const recover = easeInOut(clamp((elapsed - 0.35) / 0.15, 0, 1));
+      reach = Math.sin(swing * Math.PI / 2) * (1 - lower); open = (1 - recover) * Math.min(1, swing * 3);
+      p.x += lerp(lerp(this.throwRaise * 0.1, -0.055, reach), 0.02, lower) * (1 - recover);
+      p.y += lerp(lerp(this.throwRaise * 0.13, 0.045, reach), -0.23, lower) * (1 - recover);
+      p.z += lerp(lerp(-this.throwRaise * 0.05, -0.19 - this.throwCharge * 0.045, reach), 0.03, lower) * (1 - recover);
+      r.x -= lerp(lerp(this.throwRaise * 0.18, 0.95, reach), 0.45, lower) * (1 - recover);
+      r.z -= lerp(this.throwRaise * 0.12, 0.12, reach) * (1 - recover);
+      this.raise = lerp(this.throwRaise, 1, swing) * (1 - recover);
+    } else {
+      p.x += this.raise * 0.1; p.y += this.raise * 0.13; p.z -= this.raise * 0.05;
+      r.x -= this.raise * 0.18; r.z -= this.raise * 0.12;
+    }
+    this.root.scale.setScalar(lerp(this.scale, 0.23, this.raise)); this.root.userData.viewOpacity = lerp(0.68, 0.44, this.raise);
+    this.grip.rotation.set(0.08 - open * 0.5, -0.12, -0.1);
+    for (const { finger, tip } of this.fingers) { finger.rotation.x = lerp(-1.0, -0.12, open); tip.rotation.x = lerp(-0.95, -0.08, open); }
+    this.wrist.set(0, -0.175, 0.135).applyEuler(this.grip.rotation);
+    this.elbow.set(0.18 + reach * 0.3, -0.86 + reach * 0.15, 0.62 + reach * 0.12);
+    this._armSegment(this.forearm, this.wrist, this.elbow); this._armSegment(this.upperArm, this.elbow, this.shoulder);
   }
 }
 
 export class Katana extends ViewModel {
   constructor(ctx) {
-    super(ctx); this.name = 'KATANA'; this.hint = 'slash · hold aim to block & return bullets'; this.kind = 'katana';
+    super(ctx); this.name = 'KATANA'; this.hint = 'hold fire to charge - release to slash; aim to block'; this.kind = 'katana';
     this.basePos.set(0.27, -0.25, -0.4); this.baseRot.set(0.75, 0.15, -0.35); this.aimPos.copy(this.basePos);
     this.slashT = 0; this.slashDur = 0.27; this.combo = 0; this.comboT = 0; this.blocking = false; this.blockT = 0; this.blockAmt = 0; this.hitDone = false; this.cooldown = 0; this.damage = 75;
     // guard pose: the sword simply comes in close to the face, held upright
     this.blockPos = new THREE.Vector3(0.21, -0.31, -0.36); this.blockRot = new THREE.Vector3(1.40, 0.30, 1.24); this.deflectKick = 0;
     this.parrySwing = 0; this.parryDir = 1; this.bloodLevel = 0;
-    this.build();
+    this.charge = 0; this.charging = false; this.chargeBlocked = false; this.slashCharge = 0;
+    this.chargeStart = null; this.chargeAfter = performance.now();
+    this.build(); this.setSkin(this._skin, this._appearanceInk);
   }
   build() {
-    const mat = makeInkMaterial({ ink: INK.BLUE }), dark = makeInkMaterial({ ink: INK.BLACK }); const g = this.root;
+    const mat = this.mat = makeInkMaterial({ ink: INK.BLUE, surface: 'metal' }), dark = makeInkMaterial({ ink: INK.BLACK, surface: 'metal' }); const g = this.root;
     this.blade = bx(0.012, 0.035, 1.0, 0, 0, -0.55, mat, g); bx(0.012, 0.02, 0.08, 0, 0.007, -1.07, mat, g).rotation.x = 0.3;
     bx(0.1, 0.1, 0.02, 0, 0, -0.05, dark, g); bx(0.03, 0.036, 0.3, 0, 0, 0.12, dark, g);
     for (let i = 0; i < 6; i++) bx(0.036, 0.04, 0.02, 0, 0, 0.02 + i * 0.045, mat, g);
@@ -423,10 +555,14 @@ export class Katana extends ViewModel {
     }
   }
   get spreadPx() { return 4; }
-  startSlash(st) {
+  cancelCharge(latch = true) { const held = this.charging || this.ctx.input.down('fire'); this.charging = false; this.charge = 0; this.chargeStart = null; this.chargeAfter = performance.now(); if (latch) this.chargeBlocked = held; }
+  unequip() { this.cancelCharge(); super.unequip(); }
+  startSlash(st, charge = 0) {
     if (!this.allowed) return false;
+    if (st.fire && !this.charging) this.chargeBlocked = true;
+    this.cancelCharge(false); this.slashCharge = charge <= 0.1 ? 0 : clamp(charge, 0, 1);
     this.slashT = this.slashDur; this.hitDone = false; this.combo++; this.comboT = 0.9; this.cooldown = this.slashDur + 0.06;
-    audio.katanaSwing(); this.ctx.player.kickFov(2);
+    audio.katanaSwing(); this.ctx.player.kickFov(2 + charge * 0.8);
     if (st.sprinting || !st.grounded) this.ctx.player.lunge(5.5);
     const P = this.ctx.player, s = this.combo % 2 === 0 ? -1 : 1; const up = _v2.set(0, 1, 0);
     for (let i = 0; i < 9; i++) {
@@ -435,14 +571,29 @@ export class Katana extends ViewModel {
       const pb = P.eye.clone().addScaledVector(P.forward, 1.3).addScaledVector(P.right, Math.cos(b) * 0.9 * s).addScaledVector(up, Math.sin(b) * 0.55 - 0.1);
       this.ctx.effects.tracer(pa, pb, INK.BLUE, 0.03 - 0.002 * i, 0.12 + i * 0.01);
     }
+    return true;
   }
   update(dt, st) {
-    if (!this.allowed) { this.slashT = 0; this.blocking = false; return; }
+    if (!this.allowed) { this.cancelCharge(); this.slashT = 0; this.blocking = false; return; }
+    const controlsAvailable = this.ctx.player._grenadeControlsAllowed(), canInput = controlsAvailable && !st.blockFire;
+    const timing = this.ctx.input.holdTiming('fire'), now = performance.now(), fireHeld = timing ? timing.held : st.fire;
     this.cooldown -= dt; this.comboT -= dt; if (this.comboT <= 0) this.combo = 0; this.deflectKick = Math.max(0, this.deflectKick - dt * 6);
     this.parrySwing = Math.max(0, this.parrySwing - dt * 4.5);
     this.updateBlood(dt, st);
+    if (!st.fire) this.chargeBlocked = false;
+    if (this.chargeBlocked && timing?.start > this.chargeAfter) this.chargeBlocked = false;
+    if (!canInput || st.aim) this.cancelCharge();
+    // Quick taps keep their original cut; holding winds up one stronger cut on release.
+    if (st.meleePressed && this.slashT <= 0 && this.cooldown <= 0 && controlsAvailable) { this.cancelCharge(); this.startSlash(st); }
+    else if (canInput && !st.aim && this.slashT <= 0 && this.cooldown <= 0 && !this.chargeBlocked) {
+      if (st.fire && !this.charging) { this.charging = true; this.chargeStart = Math.max(this.chargeAfter, timing?.start ?? now); }
+      if (this.charging) {
+        this.charge = clamp(((fireHeld ? now : timing?.end ?? now) - this.chargeStart) / 800, 0, 1);
+        if (!fireHeld) this.startSlash(st, this.charge);
+      }
+    }
     // guard is up only while the aim trigger is held and you are not swinging
-    const wantBlock = st.aim && !st.fire && this.slashT <= 0 && this.cooldown <= 0;
+    const wantBlock = controlsAvailable && st.aim && (!st.fire || this.chargeBlocked) && this.slashT <= 0 && this.cooldown <= 0;
     if (wantBlock && !this.blocking) this.blockT = 0;
     this.blocking = wantBlock; if (this.blocking) this.blockT += dt;
     this.blockAmt = damp(this.blockAmt, this.blocking ? 1 : 0, 16, dt);
@@ -461,24 +612,24 @@ export class Katana extends ViewModel {
       r.z += this.parryDir * e * 0.42; r.y += this.parryDir * e * 0.16;
       p.x += this.parryDir * e * 0.035;
     }
+    if (this.charging) { const c = 0.25 + this.charge * 0.75; p.x += c * 0.09; p.y += c * 0.05; p.z += c * 0.1; r.x += c * 0.5; r.y -= c * 0.6; r.z -= c * 0.35; }
     if (this.slashT > 0) {
       this.slashT -= dt; const t = clamp(1 - this.slashT / this.slashDur, 0, 1); const e = easeInOut(t); const s = this.combo % 2 === 0 ? -1 : 1;
       r.z += s * (1.3 - 2.7 * e); r.x += 0.7 - 1.5 * e; r.y += s * (-0.35 + 0.8 * e);
       p.x += s * (0.2 - 0.45 * e); p.y += 0.14 - 0.24 * e; p.z -= 0.12 * Math.sin(t * Math.PI);
       if (!this.hitDone && t > 0.32) { this.hitDone = true; this.doHit(st, s); }
-    } else if ((st.firePressed || (st.fire && this.combo > 0)) && this.cooldown <= 0 && !st.blockFire) this.startSlash(st);
-    if (st.meleePressed && this.slashT <= 0 && this.cooldown <= 0) this.startSlash(st);
+    }
   }
   doHit(st, s) {
     if (!this.allowed) return;
-    const ctx = this.ctx, P = ctx.player;
+    const ctx = this.ctx, P = ctx.player, multiplier = 1 + 2 * this.slashCharge;
     const hits = ctx.enemies.inArc(P.eye, P.forward, 3.0, Math.cos(0.95));
     _v2.copy(P.forward); _v.set(-P.forward.z, 0, P.forward.x).multiplyScalar(s * 0.7); _v2.add(_v).y -= 0.35; _v2.normalize();
     let any = false;
-    for (const h of hits) { any = true; const point = h.enemy.center.clone(); point.y += rand(-0.2, 0.4); ctx.enemies.damage(h.enemy, this.damage, { point, dir: _v2.clone(), part: 'torso', source: 'katana', crit: false, slashDir: s }); }
-    if (ctx.playersInArc) for (const t of ctx.playersInArc(P.eye, P.forward, 3.0, Math.cos(0.95))) { any = true; ctx.hitPlayer(t, 55, { point: t.center.clone(), dir: _v2.clone(), part: 'torso', source: 'katana', crit: false }); }
+    for (const h of hits) { any = true; const point = h.enemy.center.clone(); point.y += rand(-0.2, 0.4); ctx.enemies.damage(h.enemy, this.damage * multiplier, { point, dir: _v2.clone(), part: 'torso', source: 'katana', crit: false, slashDir: s }); }
+    if (ctx.playersInArc) for (const t of ctx.playersInArc(P.eye, P.forward, 3.0, Math.cos(0.95))) { any = true; ctx.hitPlayer(t, 55 * multiplier, { point: t.center.clone(), dir: _v2.clone(), part: 'torso', source: 'katana', crit: false, charge: this.slashCharge }); }
     if (ctx.cutRopes && ctx.cutRopes(P.eye, P.forward, 3.4)) any = true;
-    if (ctx.breakablesInArc) for (const br of ctx.breakablesInArc(P.eye, P.forward, 3.2, Math.cos(1.0))) { any = true; ctx.breakHit(br, this.damage, br.pos.clone(), _v2.clone()); }
+    if (ctx.breakablesInArc) for (const br of ctx.breakablesInArc(P.eye, P.forward, 3.2, Math.cos(1.0))) { any = true; ctx.breakHit(br, this.damage * multiplier, br.pos.clone(), _v2.clone()); }
     // a swing only cuts; bullets are turned aside by the raised guard, never by a slash
     if (any) { audio.katanaHit(); ctx.game.hitstop(0.07, 0.12); ctx.effects.shakeAmt += 0.12; ctx.input.rumble(0.7, 0.4, 90); this.recoil.kick(0, 0, 1.5); }
   }

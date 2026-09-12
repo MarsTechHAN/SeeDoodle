@@ -17,6 +17,7 @@ export const SETTINGS = {
   shake:      { def: 100, min: 0, max: 150, step: 10, unit: '%' },
   bob:        { def: 100, min: 0, max: 150, step: 10, unit: '%' },
   invert:     { def: false },
+  grenadeAutoPin: { def: false },
   ballistics: { def: false },
   difficulty: { def: 'easy', choices: ['easy', 'medium', 'hard', 'extreme'] },
 };
@@ -42,6 +43,22 @@ export const WEAPON_MODES = {
   knives: { key: 'knives', name: 'KNIVES ONLY', blurb: 'katana and unlimited grenades - no guns', weapons: ['katana'], grenades: true, infiniteGrenades: true },
 };
 export const weaponModeOf = (k) => Object.hasOwn(WEAPON_MODES, k) ? WEAPON_MODES[k] : WEAPON_MODES.normal;
+
+export const SKINS = {
+  classic: { key: 'classic', name: 'CLASSIC INK', blurb: 'pen lines on notebook paper' },
+  toon: { key: 'toon', name: 'SUNLIT TOON', blurb: 'warm light, painted worlds, colorful outfits' },
+};
+export const skinOf = (k) => Object.hasOwn(SKINS, k) ? SKINS[k] : SKINS.classic;
+
+export const APPEARANCE_OPTIONS = {
+  gender: [{ key: 'neutral', name: 'ANDROGYNOUS' }, { key: 'female', name: 'FEMININE' }, { key: 'male', name: 'MASCULINE' }],
+  hair: [{ key: 'short', name: 'SIDE PART' }, { key: 'crop', name: 'CROPPED' }, { key: 'curly', name: 'CURLS' }, { key: 'bob', name: 'BOB' }, { key: 'ponytail', name: 'PONYTAIL' }, { key: 'bald', name: 'SHAVED' }],
+  tones: ['#f2c9a4', '#dca577', '#bc8255', '#995f3b', '#74452e', '#4c2b20'],
+};
+export function appearanceOf(value) {
+  const a = value && typeof value === 'object' ? value : {};
+  return { gender: APPEARANCE_OPTIONS.gender.some((o) => o.key === a.gender) ? a.gender : 'neutral', tone: Number.isInteger(a.tone) && a.tone >= 0 && a.tone < APPEARANCE_OPTIONS.tones.length ? a.tone : 2, hair: APPEARANCE_OPTIONS.hair.some((o) => o.key === a.hair) ? a.hair : 'short' };
+}
 
 // Versus only, and the host's call. A wave of enemies needs a player who can wall-jump out of a
 // corner and dash across a street; another player does not, and a duel decided by who is airborne

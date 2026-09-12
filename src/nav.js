@@ -19,6 +19,8 @@ export class NavGrid {
   constructor(world, bounds, cell = 1.0, agentR = 0.42) {
     this.world = world; this.cell = cell; this.agentR = agentR;
     this.minX = bounds.minX; this.minZ = bounds.minZ;
+    // Underground team routes include the service tunnels below the usual map floor.
+    this.minY = bounds.minY ?? -5;
     this.nx = Math.ceil((bounds.maxX - bounds.minX) / cell); this.nz = Math.ceil((bounds.maxZ - bounds.minZ) / cell);
     this.nodes = []; this.cells = new Array(this.nx * this.nz).fill(null);
     this._gen = null; this._searchId = 0;
@@ -32,7 +34,7 @@ export class NavGrid {
       const tops = new Set();
       for (const b of _q) if (!b.data.noNav) tops.add(b.max.y);
       for (const y of [...tops].sort((a, b) => a - b)) {
-        if (y < -5 || y > 70) continue;
+        if (y < this.minY || y > 70) continue;
         _min.set(x - 0.3, y + 0.5, z - 0.3); _max.set(x + 0.3, y + 1.85, z + 0.3);
         if (w.overlapsAABB(_min, _max)) continue;
         const id = this.nodes.length; this.nodes.push({ id, x, y, z, ix, iz, links: [] });

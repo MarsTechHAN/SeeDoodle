@@ -20,10 +20,12 @@ export function isTouchDevice() {
 // which is the thing the left one existed to allow, so it was one more ring in a picture that had
 // too many - and it sat exactly where the movement stick wants to be.
 const BTNS = [
-  ['score', 'TAB', 'b-score'], ['pause', '❚❚', 'b-pause'],
+  ['score', 'MAP', 'b-score'], ['pause', '❚❚', 'b-pause'],
   ['slot1', '1', 'b-s1'], ['slot2', '2', 'b-s2'], ['slot3', '3', 'b-s3'], ['slot4', '4', 'b-s4'], ['slot5', '5', 'b-s5'],
   ['grenade', 'NADE', 'b-nade'], ['grapple', 'HOOK', 'b-hook'], ['melee', 'SLASH', 'b-melee'], ['crouch', 'SLIDE', 'b-slide'],
   ['reload', 'RELOAD', 'b-reload'], ['jump', 'JUMP', 'b-jump'], ['aim', 'AIM', 'b-aim'],
+  ['nadeCancel', 'CANCEL', 'b-nade-cancel gone'],
+  ['interact', 'INTERACT', 'b-interact gone'], ['bombDrop', 'DROP C4', 'b-bomb-drop gone'],
   ['fire', 'FIRE', 'b-fire'],
 ];
 
@@ -47,9 +49,10 @@ export class TouchControls {
     onLangChange(() => {
       this._faces.forEach((el, i) => { el.textContent = ts(BTNS[i][1]); });
       const mode = this._weaponMode || 'normal'; this._weaponMode = null; this.setWeaponMode(mode);
+      this._grenadeKey = null; this.setGrenadeState(this._grenadeState);
       const m = this.rotEl && this.rotEl.querySelector('.rotmsg'); if (m) m.textContent = ts('turn your phone sideways');
     });
-    // shown by CSS only while the phone is upright; it sits outside .tc so a menu cannot hide it
+    // A passive portrait hint; CSS hides it while a menu or the tactical map is open.
     const rot = document.createElement('div');
     rot.className = 'tc-rot'; rot.innerHTML = `<span>▯</span><div class="rotmsg">${ts('turn your phone sideways')}</div>`;
     root.appendChild(rot); this.rotEl = rot;
@@ -69,11 +72,11 @@ export class TouchControls {
   setActive(on) {
     if (on === this.active) return;
     this.active = on;
-    if (!on) { this.ptrs.clear(); this.stick = null; this.frames = {}; this.aimOn = false; this._syncBtns(); this._syncStick(); }
+    if (!on) { for (const a of Object.keys(this.frames)) this.input.markTouchHold(a, false); this.ptrs.clear(); this.stick = null; this.frames = {}; this.aimOn = false; this._syncBtns(); this._syncStick(); }
   }
 
   _btnAt(e) { return e.target && e.target.closest ? e.target.closest('.tb') : null; }
-  _onMenu(e) { return e.target && e.target.closest ? !!e.target.closest('#screen') : false; }
+  _onMenu(e) { return e.target && e.target.closest ? !!e.target.closest('#screen, .board') : false; }
 
   _down(e) {
     if (!this.active || this._onMenu(e)) return;
@@ -111,9 +114,9 @@ export class TouchControls {
       return;
     }
     if (p.kind === 'look' || (p.kind === 'btn' && p.look)) {
+      p.overCancel = this._overGrenadeCancel(e, p); this._syncCancelHover();
       // straight into the same accumulator the mouse feeds, so one sensitivity setting covers both
-      this.input.mx += (e.clientX - p.x) * this.sens;
-      this.input.my += (e.clientY - p.y) * this.sens;
+      if (!p.overCancel) { this.input.mx += (e.clientX - p.x) * this.sens; this.input.my += (e.clientY - p.y) * this.sens; }
       p.x = e.clientX; p.y = e.clientY;
       this.input.usingTouch = true; this.input.lastActive = performance.now(); this.input.anyInput = true;
     }
@@ -121,13 +124,31 @@ export class TouchControls {
 
   _up(e) {
     const p = this.ptrs.get(e.pointerId); if (!p) return;
+    // Losing a touch is an interruption, not an intentional throw. The same cancel action safely
+    // stows a safe grenade or drops a live one, without leaving a held input behind.
+    if ((e.type === 'pointercancel' && this._weaponMode === 'grenades' && (p.a === 'fire' || p.a === 'grenade')) ||
+        (e.type === 'pointerup' && this._overGrenadeCancel(e, p))) {
+      this._press('nadeCancel'); this._release('nadeCancel');
+    }
+    if (e.type === 'pointercancel' && p.a === 'fire') this.input.onControlCancel?.();
     this.ptrs.delete(e.pointerId);
+    this._syncCancelHover();
     if (p.kind === 'stick') { this.stick = null; this._syncStick(); }
     else if (p.kind === 'btn') { this._release(p.a); p.btn.classList.remove('on'); }
   }
 
-  _press(a) { const f = (this.frames[a] ||= { down: 0, n: 0 }); f.down++; f.n = 0; }
-  _release(a) { const f = this.frames[a]; if (f) f.down = Math.max(0, f.down - 1); }
+  _press(a) { const f = (this.frames[a] ||= { down: 0, n: 0 }); f.down++; f.n = 0; this.input.markTouchHold(a, true); }
+  _release(a) { const f = this.frames[a]; if (f) { f.down = Math.max(0, f.down - 1); this.input.markTouchHold(a, f.down > 0); } }
+  _overGrenadeCancel(e, pointer) {
+    if (pointer.a !== 'fire' || this._weaponMode !== 'grenades' || !['safe', 'armed'].includes(this._grenadeState?.state)) return false;
+    const el = this.btnEls.nadeCancel?.[0]; if (!el || !el.getClientRects().length) return false;
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 && Math.hypot((e.clientX - r.x - r.width / 2) / (r.width / 2), (e.clientY - r.y - r.height / 2) / (r.height / 2)) <= 1;
+  }
+  _syncCancelHover() {
+    const over = [...this.ptrs.values()].some((p) => p.overCancel);
+    for (const el of this.btnEls.nadeCancel || []) el.classList.toggle('drop-target', over);
+  }
 
   _syncStick() {
     const s = this.stick, el = this.stickEl;
@@ -136,12 +157,17 @@ export class TouchControls {
     el.style.transform = `translate(${s.ox.toFixed(0)}px, ${s.oy.toFixed(0)}px)`;
     el.querySelector('b').style.transform = `translate(${(s.x * 52).toFixed(0)}px, ${(-s.y * 52).toFixed(0)}px)`;
   }
-  _syncBtns() { for (const a in this.btnEls) for (const el of this.btnEls[a]) el.classList.remove('on'); }
+  _syncBtns() { for (const a in this.btnEls) for (const el of this.btnEls[a]) el.classList.remove('on', 'drop-target'); }
+  _syncFireFace() {
+    const face = ts(this._weaponMode === 'grenades' ? 'THROW' : this._weaponMode === 'knives' || this._katanaActive ? 'CHARGE' : 'FIRE');
+    for (const el of this.btnEls.fire || []) if (el.textContent !== face) el.textContent = face;
+  }
 
   // The weapon list in the corner of the HUD is off on a phone - four buttons already say what you
   // are carrying, so the buttons carry the readout instead: the one in your hands is inked in, one
   // that is dry goes red, and a slot you do not own yet is not drawn at all.
   setSlots(slots) {
+    this._katanaActive = slots.some((s) => s.active && s.name === 'KATANA'); this._syncFireFace();
     const key = slots.map((s, i) => `${s.slot ?? i + 1}:${s.active ? 'a' : s.empty ? 'e' : 'o'}`).join('|');
     if (key === this._slotKey) return; this._slotKey = key;
     for (let i = 0; i < 5; i++) {
@@ -159,9 +185,32 @@ export class TouchControls {
     for (const action of ['grenade', 'melee', 'reload', 'aim']) {
       const hidden = action === 'grenade' ? false : action === 'melee' || action === 'aim' ? grenades : grenades || knives;
       for (const el of this.btnEls[action] || []) el.classList.toggle('gone', hidden);
-      if (hidden) delete this.frames[action];
+      if (hidden) { delete this.frames[action]; this.input.markTouchHold(action, false); }
     }
-    for (const el of this.btnEls.fire || []) el.textContent = ts(grenades ? 'THROW' : knives ? 'SLASH' : 'FIRE');
+    this._syncFireFace();
+    this._grenadeKey = null; this.setGrenadeState(this._grenadeState);
+  }
+
+  setGrenadeState(status) {
+    this._grenadeState = status;
+    const state = this._weaponMode === 'grenades' ? status?.state || 'idle' : 'idle';
+    const key = state + ts('CANCEL'); if (key === this._grenadeKey) return; this._grenadeKey = key;
+    for (const el of this.btnEls.nadeCancel || []) {
+      el.classList.toggle('gone', state === 'idle'); el.classList.toggle('live', state === 'armed');
+      el.textContent = ts(state === 'armed' ? 'DROP' : 'CANCEL');
+    }
+    for (const el of this.btnEls.reload || []) {
+      el.textContent = ts(this._weaponMode === 'grenades' ? 'PULL PIN' : 'RELOAD');
+      el.classList.toggle('gone', this._weaponMode === 'grenades' ? state !== 'safe' : this._weaponMode === 'knives');
+    }
+    if (state === 'idle') { for (const p of this.ptrs.values()) p.overCancel = false; this._syncCancelHover(); }
+  }
+
+  setObjective(available, kind, carrying) {
+    for (const el of this.btnEls.interact || []) { el.classList.toggle('gone', !available); el.textContent = ts(kind === 'plant' ? 'PLANT C4' : 'DEFUSE C4'); }
+    for (const el of this.btnEls.bombDrop || []) el.classList.toggle('gone', !carrying);
+    if (!available) { delete this.frames.interact; this.input.markTouchHold('interact', false); }
+    if (!carrying) { delete this.frames.bombDrop; this.input.markTouchHold('bombDrop', false); }
   }
 
   // called once per frame, before Input.update folds everything together
@@ -191,7 +240,14 @@ export const TOUCH_CONTROLS_HTML = `
     <div><b>Left half</b> drag to move · push all the way forward to sprint</div>
     <div><b>Right half</b> drag to look around</div>
     <div><b>FIRE</b> hold to shoot — drag off it to keep aiming while you do</div>
+    <div><b>CHARGE</b> with a katana: hold and drag to aim, release to slash</div>
+    <div><b>KATANA</b> full charge in 0.8 seconds = 3x damage</div>
     <div><b>AIM</b> is a toggle: tap once to sight in, again to come out</div>
+    <div><b>THROW</b> in grenades only: hold and drag to aim, release to throw</div>
+    <div><b>PULL PIN</b> starts the 7-second fuse and locks the current throw power</div>
+    <div><b>Full charge</b> stays safe by default; automatic pin pull is optional in settings</div>
+    <div><b>CANCEL</b> stows a safe grenade; after pulling the pin, DROP leaves it at your feet</div>
+    <div><b>THROW</b> drag to CANCEL or DROP and release there; passing over does not cancel</div>
   </div>
   <div><div class="colhead">BUTTONS</div>
     <div><b>JUMP</b> again in the air = double jump · at a wall = wall jump</div>
@@ -200,11 +256,13 @@ export const TOUCH_CONTROLS_HTML = `
     <div><b>SLASH</b> quick katana · <b>NADE</b> hold to throw further</div>
     <div><b>AIM + FIRE</b> dash-slash once the katana gauge is lit</div>
     <div><b>1-4</b> along the bottom pick a weapon</div>
+    <div><b>MAP</b> tap to open map and scores; tap again or fire to close</div>
   </div>
 </div>`;
 
 export const TOUCH_KEYS = {
   fire: 'FIRE', aim: 'AIM', block: 'AIM', jump: 'JUMP', sprint: 'push the stick forward', slide: 'SLIDE', dash: 'SLIDE',
   grapple: 'HOOK', melee: 'SLASH', reload: 'RELOAD', grenade: 'NADE', focus: 'AIM + FIRE', next: 'the weapon numbers',
-  pause: '❚❚', confirm: 'tap the screen', score: 'TAB',
+  pause: '❚❚', confirm: 'tap the screen', score: 'MAP',
+  nadePin: 'PULL PIN', nadeCancel: 'CANCEL', interact: 'INTERACT', bombDrop: 'DROP C4',
 };
